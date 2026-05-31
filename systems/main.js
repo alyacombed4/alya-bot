@@ -6,6 +6,10 @@ const LOG_CHANNEL = "1479261311635554435";
 const WARN_LIMIT = 3;
 const TIMEOUT = 10 * 60 * 1000;
 
+const USER_ID = "1372615579407618209";
+const MONITORED_CHANNEL = "1476321423042543706";
+const TARGET_CHANNEL = "1476321416470335659";
+
 let warns = {};
 
 if (fs.existsSync("./warns.json")) {
@@ -16,6 +20,31 @@ function save() {
   fs.writeFileSync("./warns.json", JSON.stringify(warns, null, 2));
 }
 
+/* =========================
+   VOICE AUTO MOVE SYSTEM
+========================= */
+client.on("voiceStateUpdate", async (oldState, newState) => {
+  try {
+    if (newState.id !== USER_ID) return;
+
+    const member = newState.member;
+    if (!member) return;
+
+    // se entrou ou está na call monitorada
+    if (newState.channelId === MONITORED_CHANNEL) {
+      await member.voice.setChannel(TARGET_CHANNEL);
+      console.log(`Usuário movido automaticamente para sala alvo.`);
+    }
+
+  } catch (err) {
+    console.error("Erro no voiceStateUpdate:", err);
+  }
+});
+
+
+/* =========================
+   MESSAGE SYSTEM (WARS)
+========================= */
 client.on("messageCreate", async (message) => {
 
 if (!message.guild) return;
@@ -64,7 +93,6 @@ log.send(
 📊 Total: ${warns[user.id].length}/${WARN_LIMIT}`
 );
 }
-
 
 if (warns[user.id].length >= WARN_LIMIT) {
 
