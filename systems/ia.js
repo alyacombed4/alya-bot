@@ -38,7 +38,7 @@ module.exports = (client) => {
                 await message.channel.sendTyping();
 
                 const respostaIA = await openai.chat.completions.create({
-                    model: "meta-llama/llama-3.3-70b-instruct:free",
+                    model: "llama-3-8b-instruct:free",
                     messages: [
                         {
                             role: "system",
