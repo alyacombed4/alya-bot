@@ -75,9 +75,11 @@ module.exports = (client) => {
 
                 console.error("ERRO IA:", err);
 
-                return message.reply(
-                    `❌ Erro ao processar a pergunta.\n\`${err.message}\``
-                );
+               console.error("ERRO IA:", err);
+
+return message.reply(
+    "❌ A IA está indisponível no momento. Tente novamente mais tarde."
+);
             }
         }
 
