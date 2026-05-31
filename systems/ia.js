@@ -3,14 +3,19 @@ const OpenAI = require("openai");
 
 module.exports = (client) => {
 
+    const apiKey = process.env.GROQ_API_KEY;
+
+    console.log("🔑 API KEY:", apiKey ? "OK" : "NÃO ENCONTRADA");
+
+    if (!apiKey) {
+        console.error("❌ GROQ_API_KEY não foi definida no Railway!");
+    }
+
     const openai = new OpenAI({
         baseURL: "https://literouter.com/api/v1",
-        apiKey: process.GROQ_API_KEY
+        apiKey: apiKey
     });
-    console.log(
-    "API KEY:",
-    process.env.GROQ_API_KEY ? "OK" : "NÃO ENCONTRADA"
-);
+
     console.log("✅ Sistema de IA carregado");
 
     client.on("messageCreate", async (message) => {
@@ -48,16 +53,14 @@ module.exports = (client) => {
                 });
 
                 const resposta =
-                    respostaIA.choices?.[0]?.message?.content ||
+                    respostaIA?.choices?.[0]?.message?.content ||
                     "Não consegui gerar uma resposta.";
 
                 if (resposta.length > 1900) {
 
                     const partes = resposta.match(/[\s\S]{1,1900}/g);
 
-                    await message.reply(
-                        `🤖 **Resposta:**\n${partes[0]}`
-                    );
+                    await message.reply(`🤖 **Resposta:**\n${partes[0]}`);
 
                     for (let i = 1; i < partes.length; i++) {
                         await message.channel.send(partes[i]);
@@ -65,21 +68,16 @@ module.exports = (client) => {
 
                 } else {
 
-                    await message.reply(
-                        `🤖 **Resposta:**\n${resposta}`
-                    );
-
+                    await message.reply(`🤖 **Resposta:**\n${resposta}`);
                 }
 
             } catch (err) {
 
-                console.error("ERRO IA:", err);
+                console.error("❌ ERRO IA:", err?.message || err);
 
-               console.error("ERRO IA:", err);
-
-return message.reply(
-    "❌ A IA está indisponível no momento. Tente novamente mais tarde."
-);
+                return message.reply(
+                    "❌ A IA está indisponível no momento. Tente novamente mais tarde."
+                );
             }
         }
 
@@ -102,9 +100,7 @@ return message.reply(
                     text: "Powered by LiteRouter + Llama 3.3"
                 });
 
-            await message.reply({
-                embeds: [embed]
-            });
+            await message.reply({ embeds: [embed] });
         }
 
     });
