@@ -2,12 +2,7 @@ const { Client, GatewayIntentBits } = require("discord.js");
 const fs = require("fs");
 const path = require("path");
 const https = require("https");
-const {
-  backupServer,
-  restoreServer,
-  zipBackup,
-  splitFile,
-} 
+
 
 const client = new Client({
   intents: [
