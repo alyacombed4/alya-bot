@@ -7,7 +7,7 @@ const {
   restoreServer,
   zipBackup,
   splitFile,
-} = require("./systems/backupRestore");
+} 
 
 const client = new Client({
   intents: [
