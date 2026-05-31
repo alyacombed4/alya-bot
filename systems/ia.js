@@ -7,7 +7,10 @@ module.exports = (client) => {
         baseURL: "https://literouter.com/api/v1",
         apiKey: process.env.GROQ_API_KEY
     });
-
+    console.log(
+    "API KEY:",
+    process.env.GROQ_API_KEY ? "OK" : "NÃO ENCONTRADA"
+);
     console.log("✅ Sistema de IA carregado");
 
     client.on("messageCreate", async (message) => {
