@@ -128,7 +128,7 @@ module.exports = (client) => {
         }
  
         // ── !ajudaia ──────────────────────────────────────────────────────────
-        if (conteudo === "!ajudaia") {
+         if (conteudo === "!ajudaia") {
             const embed = new EmbedBuilder()
                 .setTitle("🤖 Comandos da IA")
                 .setColor(0x0099ff)
@@ -146,8 +146,15 @@ module.exports = (client) => {
                         value: "`!pergunta O que é JavaScript?`",
                     }
                 )
-                .setFooter({ text: "Powered by LiteRouter + Llama 3.3" });
- 
-            return message.reply({ embeds: [embed] });
+                .setFooter({
+                    text: "Powered by LiteRouter + Llama 3.3"
+                });
+
+            return message.reply({
+                embeds: [embed]
+            });
         }
+
     });
+
+};
