@@ -1,9 +1,10 @@
 const { EmbedBuilder } = require("discord.js");
-const Groq = require("groq-sdk");
+const OpenAI = require("openai");
 
 module.exports = (client) => {
 
-    const groq = new Groq({
+    const openai = new OpenAI({
+        baseURL: "https://literouter.com/api/v1",
         apiKey: process.env.GROQ_API_KEY
     });
 
@@ -13,9 +14,6 @@ module.exports = (client) => {
 
         if (message.author.bot) return;
 
-        // ================================
-        // COMANDO !PERGUNTA
-        // ================================
         if (message.content.toLowerCase().startsWith("!pergunta")) {
 
             const pergunta = message.content.slice(10).trim();
@@ -31,32 +29,28 @@ module.exports = (client) => {
 
                 await message.channel.sendTyping();
 
-                const chatCompletion =
-                    await groq.chat.completions.create({
-                        messages: [
-                            {
-                                role: "system",
-                                content:
-                                    "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
-                            },
-                            {
-                                role: "user",
-                                content: pergunta
-                            }
-                        ],
-                        model: "llama-3.3-70b-versatile",
-                        temperature: 0.7,
-                        max_tokens: 2048
-                    });
+                const respostaIA = await openai.chat.completions.create({
+                    model: "meta-llama/llama-3.3-70b-instruct:free",
+                    messages: [
+                        {
+                            role: "system",
+                            content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
+                        },
+                        {
+                            role: "user",
+                            content: pergunta
+                        }
+                    ],
+                    temperature: 0.7
+                });
 
                 const resposta =
-                    chatCompletion.choices[0]?.message?.content ||
+                    respostaIA.choices?.[0]?.message?.content ||
                     "Não consegui gerar uma resposta.";
 
                 if (resposta.length > 1900) {
 
-                    const partes =
-                        resposta.match(/[\s\S]{1,1900}/g);
+                    const partes = resposta.match(/[\s\S]{1,1900}/g);
 
                     await message.reply(
                         `🤖 **Resposta:**\n${partes[0]}`
@@ -78,33 +72,12 @@ module.exports = (client) => {
 
                 console.error("ERRO IA:", err);
 
-                if (
-                    err.message?.includes("429") ||
-                    err.status === 429
-                ) {
-                    return message.reply(
-                        "⚠️ Limite da API atingido. Tente novamente mais tarde."
-                    );
-                }
-
-                if (
-                    err.message?.includes("401") ||
-                    err.status === 401
-                ) {
-                    return message.reply(
-                        "⚠️ API Key inválida."
-                    );
-                }
-
                 return message.reply(
-                    "❌ Erro ao processar sua pergunta."
+                    `❌ Erro ao processar a pergunta.\n\`${err.message}\``
                 );
             }
         }
 
-        // ================================
-        // COMANDO !AJUDAIA
-        // ================================
         if (message.content.toLowerCase() === "!ajudaia") {
 
             const embed = new EmbedBuilder()
@@ -121,7 +94,7 @@ module.exports = (client) => {
                     }
                 )
                 .setFooter({
-                    text: "Powered by Groq + Llama 3.3"
+                    text: "Powered by LiteRouter + Llama 3.3"
                 });
 
             await message.reply({
