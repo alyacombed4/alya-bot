@@ -5,7 +5,7 @@ module.exports = (client) => {
 
     const openai = new OpenAI({
         baseURL: "https://literouter.com/api/v1",
-        apiKey: process.LITEROUTER_API_KEY
+        apiKey: process.GROQ_API_KEY
     });
     console.log(
     "API KEY:",
