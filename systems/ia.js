@@ -3,20 +3,73 @@ const OpenAI = require("openai");
 
 module.exports = (client) => {
 
-    const apiKey = process.env.GROQ_API_KEY;
+    const api1Key = process.env.GROQ_API_KEY;   // LiteRouter
+    const api2Key = process.env.GROQ_API_KEY2;  // Groq oficial
 
-    console.log("🔑 API KEY:", apiKey ? "OK" : "NÃO ENCONTRADA");
+    console.log("🔑 API 1 (LiteRouter):", api1Key ? "OK" : "NÃO ENCONTRADA");
+    console.log("🔑 API 2 (Groq):", api2Key ? "OK" : "NÃO ENCONTRADA");
 
-    if (!apiKey) {
-        console.error("❌ GROQ_API_KEY não foi definida no Railway!");
-    }
-
-    const openai = new OpenAI({
+    const api1 = new OpenAI({
         baseURL: "https://literouter.com/api/v1",
-        apiKey: apiKey
+        apiKey: api1Key
+    });
+
+    const api2 = new OpenAI({
+        baseURL: "https://api.groq.com/openai/v1",
+        apiKey: api2Key
     });
 
     console.log("✅ Sistema de IA carregado");
+
+    async function perguntarIA(pergunta) {
+
+        // API 1 (LiteRouter)
+        try {
+            const r1 = await api1.chat.completions.create({
+                model: "meta-llama/llama-3.3-70b-instruct:free",
+                messages: [
+                    {
+                        role: "system",
+                        content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
+                    },
+                    {
+                        role: "user",
+                        content: pergunta
+                    }
+                ],
+                temperature: 0.7
+            });
+
+            return r1.choices?.[0]?.message?.content;
+
+        } catch (err1) {
+            console.log("⚠️ API 1 falhou, tentando API 2...");
+        }
+
+        // API 2 (Groq)
+        try {
+            const r2 = await api2.chat.completions.create({
+                model: "llama-3.3-70b-versatile",
+                messages: [
+                    {
+                        role: "system",
+                        content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
+                    },
+                    {
+                        role: "user",
+                        content: pergunta
+                    }
+                ],
+                temperature: 0.7
+            });
+
+            return r2.choices?.[0]?.message?.content;
+
+        } catch (err2) {
+            console.error("❌ IA falhou em todas as APIs:", err2?.message || err2);
+            throw new Error("IA indisponível no momento");
+        }
+    }
 
     client.on("messageCreate", async (message) => {
 
@@ -37,24 +90,11 @@ module.exports = (client) => {
 
                 await message.channel.sendTyping();
 
-                const respostaIA = await openai.chat.completions.create({
-                    model: "llama-3-8b-instruct:free",
-                    messages: [
-                        {
-                            role: "system",
-                            content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
-                        },
-                        {
-                            role: "user",
-                            content: pergunta
-                        }
-                    ],
-                    temperature: 0.7
-                });
+                const resposta = await perguntarIA(pergunta);
 
-                const resposta =
-                    respostaIA?.choices?.[0]?.message?.content ||
-                    "Não consegui gerar uma resposta.";
+                if (!resposta) {
+                    return message.reply("❌ Não consegui gerar uma resposta.");
+                }
 
                 if (resposta.length > 1900) {
 
@@ -73,7 +113,7 @@ module.exports = (client) => {
 
             } catch (err) {
 
-                console.error("❌ ERRO IA:", err?.message || err);
+                console.error("❌ ERRO IA FINAL:", err.message || err);
 
                 return message.reply(
                     "❌ A IA está indisponível no momento. Tente novamente mais tarde."
@@ -97,7 +137,7 @@ module.exports = (client) => {
                     }
                 )
                 .setFooter({
-                    text: "Powered by LiteRouter + Llama 3.3"
+                    text: "Powered by LiteRouter + Groq Fallback"
                 });
 
             await message.reply({ embeds: [embed] });
