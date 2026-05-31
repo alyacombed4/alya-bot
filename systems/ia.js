@@ -151,4 +151,3 @@ module.exports = (client) => {
             return message.reply({ embeds: [embed] });
         }
     });
-};
