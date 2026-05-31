@@ -26,11 +26,11 @@ module.exports = (client) => {
         // API 1 (LiteRouter)
         try {
             const r1 = await api1.chat.completions.create({
-                model: "gemini-2.0-flash-lite-001:free",
+                model: "meta-llama/llama-3.3-70b-instruct:free",
                 messages: [
                     {
                         role: "system",
-                        content: "Você é um assistente útil, inteligente e psicopata dentro de um servidor Discord."
+                        content: "Você é um assistente útil, inteligente e psicopata e autista dentro de um servidor Discord."
                     },
                     {
                         role: "user",
@@ -53,7 +53,7 @@ module.exports = (client) => {
                 messages: [
                     {
                         role: "system",
-                        content: "Você é um assistente útil, inteligente e psicopata dentro de um servidor Discord."
+                        content: "Você é um assistente útil, inteligente e psicopata e autista dentro de um servidor Discord."
                     },
                     {
                         role: "user",
