@@ -26,7 +26,7 @@ module.exports = (client) => {
         // API 1 (LiteRouter)
         try {
             const r1 = await api1.chat.completions.create({
-                model: "meta-llama/llama-3.3-70b-instruct:free",
+                model: "gemini-2.0-flash-lite-001:free",
                 messages: [
                     {
                         role: "system",
