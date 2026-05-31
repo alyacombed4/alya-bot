@@ -30,7 +30,7 @@ module.exports = (client) => {
                 messages: [
                     {
                         role: "system",
-                        content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
+                        content: "Você é um assistente útil, inteligente e psicopata dentro de um servidor Discord."
                     },
                     {
                         role: "user",
@@ -49,11 +49,11 @@ module.exports = (client) => {
         // API 2 (Groq)
         try {
             const r2 = await api2.chat.completions.create({
-                model: "llama-3.3-70b-versatile",
+                model: "gemini-2.0-flash-lite-001:free",
                 messages: [
                     {
                         role: "system",
-                        content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
+                        content: "Você é um assistente útil, inteligente e psicopata dentro de um servidor Discord."
                     },
                     {
                         role: "user",
