@@ -1,5 +1,21 @@
 const { EmbedBuilder } = require("discord.js");
 const OpenAI = require("openai");
+const fs = require("fs");
+const path = require("path");
+
+const MEMORIA_FILE = path.join(__dirname, "memoriaIA.json");
+
+if (!fs.existsSync(MEMORIA_FILE)) {
+    fs.writeFileSync(MEMORIA_FILE, JSON.stringify({}, null, 2));
+}
+
+function carregarMemoria() {
+    return JSON.parse(fs.readFileSync(MEMORIA_FILE, "utf8"));
+}
+
+function salvarMemoria(data) {
+    fs.writeFileSync(MEMORIA_FILE, JSON.stringify(data, null, 2));
+}
 
 module.exports = (client) => {
 
@@ -21,26 +37,63 @@ module.exports = (client) => {
 
     console.log("✅ Sistema de IA carregado");
 
-    async function perguntarIA(pergunta) {
+    async function perguntarIA(userId, pergunta) {
+
+        const memoria = carregarMemoria();
+
+        if (!memoria[userId]) {
+            memoria[userId] = [];
+        }
+
+        const historico = memoria[userId];
+
+        const mensagens = [
+            {
+                role: "system",
+                content:
+                    "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
+            }
+        ];
+
+        for (const item of historico) {
+            mensagens.push({
+                role: "user",
+                content: item.pergunta
+            });
+
+            mensagens.push({
+                role: "assistant",
+                content: item.resposta
+            });
+        }
+
+        mensagens.push({
+            role: "user",
+            content: `${pergunta}\n\nResuma em 500 caracteres.`
+        });
 
         // API 1 (LiteRouter)
         try {
             const r1 = await api1.chat.completions.create({
                 model: "meta-llama/llama-3.3-70b-instruct:free",
-                messages: [
-                    {
-                        role: "system",
-                        content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
-                    },
-                    {
-                        role: "user",
-                        content: pergunta
-                    }
-                ],
+                messages: mensagens,
                 temperature: 0.7
             });
 
-            return r1.choices?.[0]?.message?.content;
+            const resposta = r1.choices?.[0]?.message?.content;
+
+            historico.push({
+                pergunta,
+                resposta
+            });
+
+            if (historico.length > 10) {
+                historico.splice(0, historico.length - 10);
+            }
+
+            salvarMemoria(memoria);
+
+            return resposta;
 
         } catch (err1) {
             console.log("⚠️ API 1 falhou, tentando API 2...");
@@ -50,20 +103,24 @@ module.exports = (client) => {
         try {
             const r2 = await api2.chat.completions.create({
                 model: "llama-3.3-70b-versatile",
-                messages: [
-                    {
-                        role: "system",
-                        content: "Você é um assistente útil, inteligente e amigável dentro de um servidor Discord."
-                    },
-                    {
-                        role: "user",
-                        content: pergunta
-                    }
-                ],
+                messages: mensagens,
                 temperature: 0.7
             });
 
-            return r2.choices?.[0]?.message?.content;
+            const resposta = r2.choices?.[0]?.message?.content;
+
+            historico.push({
+                pergunta,
+                resposta
+            });
+
+            if (historico.length > 10) {
+                historico.splice(0, historico.length - 10);
+            }
+
+            salvarMemoria(memoria);
+
+            return resposta;
 
         } catch (err2) {
             console.error("❌ IA falhou em todas as APIs:", err2?.message || err2);
@@ -75,9 +132,25 @@ module.exports = (client) => {
 
         if (message.author.bot) return;
 
-        if (message.content.toLowerCase().startsWith("!pergunta")) {
+        const canaisPermitidos = [
+            "1510801968606482512",
+            "1510702157677072635",
+            "1403155779552284693",
+            "1507815371523100865"
+        ];
 
-            const pergunta = message.content.slice(10).trim();
+        if (!canaisPermitidos.includes(message.channel.id)) return;
+
+        const args = message.content.split(" ");
+        const comando = args[0].toLowerCase();
+
+        if (
+            comando === "!pergunta" ||
+            comando === "!p" ||
+            comando === "!c"
+        ) {
+
+            const pergunta = args.slice(1).join(" ");
 
             if (!pergunta) {
                 return message.reply(
@@ -90,7 +163,10 @@ module.exports = (client) => {
 
                 await message.channel.sendTyping();
 
-                const resposta = await perguntarIA(pergunta);
+                const resposta = await perguntarIA(
+                    message.author.id,
+                    pergunta
+                );
 
                 if (!resposta) {
                     return message.reply("❌ Não consegui gerar uma resposta.");
@@ -121,14 +197,14 @@ module.exports = (client) => {
             }
         }
 
-        if (message.content.toLowerCase() === "!ajudaia") {
+        if (comando === "!ajudaia") {
 
             const embed = new EmbedBuilder()
                 .setTitle("🤖 Comandos da IA")
                 .setColor(0x0099ff)
                 .addFields(
                     {
-                        name: "❓ !pergunta",
+                        name: "❓ !pergunta / !p / !c",
                         value: "Faça uma pergunta para a IA."
                     },
                     {
