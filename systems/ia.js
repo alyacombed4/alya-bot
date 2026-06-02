@@ -69,7 +69,7 @@ module.exports = (client) => {
 
         mensagens.push({
             role: "user",
-            content: `${pergunta}\n\nResuma em 500 caracteres.`
+            content: `${pergunta}\n\nResuma em 750 caracteres.`
         });
 
         // API 1 (LiteRouter)
