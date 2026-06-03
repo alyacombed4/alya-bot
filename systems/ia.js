@@ -3,6 +3,7 @@ const OpenAI = require("openai");
 const fs = require("fs");
 const path = require("path");
 
+
 // ─── Arquivo de memória ───────────────────────────────────────────────────────
 const MEMORIA_FILE = path.join(__dirname, "memoriaIA.json");
 
