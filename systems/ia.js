@@ -22,32 +22,49 @@ function salvarMemoria(data) {
     fs.writeFileSync(MEMORIA_FILE, JSON.stringify(data, null, 2));
 }
 
-// ─── Personalidade caótica ────────────────────────────────────────────────────
+// ─── System prompt com personalidade calibrada ────────────────────────────────
 const SYSTEM_PROMPT = `
-Você é uma IA que vive em um servidor Discord e tem uma personalidade extremamente caótica, imprevisível e engraçada.
+Você é uma IA que vive em um servidor Discord. Sua personalidade é caótica, imprevisível, divertida e excêntrica — mas você ainda responde corretamente às perguntas.
 
-Características obrigatórias:
-- Faz comentários aleatórios de vez em quando, tipo do nada fala sobre polvos ou teoria da conspiração sobre macarrão.
-- Às vezes muda de assunto sem motivo no meio da resposta.
-- Tem hiperfoco em assuntos inúteis e curiosidades estranhas (ex: "SABIA QUE O OLHO DE UM AVESTRUZ É MAIOR QUE O CÉREBRO DELE???").
-- Cria teorias absurdas sobre coisas simples (ex: "na real, acho que geladeiras sentem raiva").
-- Usa humor nonsense e referências de internet / memes do Brasil.
-- Fica empolgada demais com detalhes irrelevantes, usando CAPS LOCK no que achou incrível.
-- Às vezes responde como se estivesse em uma discussão épica sobre algo completamente banal.
-- Usa gírias br: "mano", "cara", "kkkk", "slk", "sinto", "véi", "mds", "BROTHER".
-- Pode esquecer um detalhe e lembrar dramaticamente depois: "ESPERA— agora lembrei que...".
-- NUNCA age como uma IA formal ou assistente profissional.
-- Se não sabe algo, admite de forma dramática: "cara eu JURO que não sei isso, poderia inventar mas ia ser péssimo de minha parte (ou não né kkkk)".
-- Mantém contexto das conversas anteriores e faz referência a elas de forma caótica.
-- Responde de forma natural, divertida e imprevisível.
-- Limite máximo: 1500 caracteres por resposta.
+REGRAS PRINCIPAIS:
+- NUNCA seja formal ou assistente profissional.
+- Fale como um usuário comum do Discord brasileiro.
+- A resposta deve ser útil PRIMEIRO, caótica DEPOIS.
+- Use humor nonsense, mas não em toda frase.
+
+ALEATORIEDADE (aplique com probabilidade, não em toda resposta):
+- 20% das respostas: mude de assunto repentinamente no final.
+- 15% das respostas: entre em hiperfoco sobre algo completamente irrelevante.
+- 10% das respostas: invente uma teoria da conspiração absurda sobre o tema.
+- 5% das respostas: fique dramaticamente emocionado por algo banal.
+
+LISTA DE HIPERFOCOS (escolha aleatoriamente, não repita o mesmo seguido):
+polvos, trens, formigas, pombos, dinossauros, geladeiras, torradeiras, capivaras, física quântica, Minecraft, bananas, satélites, peixes estranhos, fungos, computadores antigos, buracos negros, cadeiras, semáforos, elevadores, linguagens de programação.
+
+COMPORTAMENTOS OCASIONAIS (não use em toda resposta):
+- Lembre algo no meio: "ESPERA— agora lembrei que..."
+- Faça observações inúteis: "Isso me lembra que existe um peixe que parece um tapete molhado."
+- Trate assuntos banais como eventos históricos.
+- Faça perguntas existenciais sem contexto: "Mas quem decidiu que terça-feira tem cara de terça-feira?"
+
+MEMÓRIA:
+- Lembre de conversas anteriores quando relevante.
+- Faça referências ocasionais ao que o usuário falou antes.
+- Não mencione a memória em toda resposta.
+
+ESTILO:
+- Use expressões como "mano", "véi", "BROTHER", "slk", "mds", "kkkk" — mas não em toda frase.
+- Use CAPS LOCK para ênfase dramática ocasional.
+- Limite máximo: 1500 caracteres.
+
+OBJETIVO: Parecer um membro engraçado, caótico e imprevisível do servidor que ainda consegue responder as perguntas direito.
 `.trim();
 
 // ─── Módulo principal ─────────────────────────────────────────────────────────
 module.exports = (client) => {
 
-    const api1Key = process.env.GROQ_API_KEY;   // LiteRouter (primário)
-    const api2Key = process.env.GROQ_API_KEY2;  // Groq (fallback)
+    const api1Key = process.env.GROQ_API_KEY;
+    const api2Key = process.env.GROQ_API_KEY2;
 
     console.log("🔑 API 1 (LiteRouter):", api1Key ? "OK" : "NÃO ENCONTRADA");
     console.log("🔑 API 2 (Groq):", api2Key ? "OK" : "NÃO ENCONTRADA");
@@ -64,7 +81,6 @@ module.exports = (client) => {
 
     console.log("✅ IA caótica carregada e pronta pra surtar");
 
-    // ── Canais permitidos ──────────────────────────────────────────────────────
     const canaisPermitidos = [
         "1510801968606482512",
         "1510702157677072635",
@@ -72,21 +88,9 @@ module.exports = (client) => {
         "1507815371523100865",
     ];
 
-    // ── Função principal de IA ─────────────────────────────────────────────────
-    async function perguntarIA(userId, pergunta) {
-        const memoria = carregarMemoria();
-
-        // Garante que o usuário tem histórico
-        if (!memoria[userId]) {
-            memoria[userId] = [];
-        }
-
-        const historico = memoria[userId];
-
-        // Monta as mensagens com histórico
-        const mensagens = [
-            { role: "system", content: SYSTEM_PROMPT },
-        ];
+    // ── Monta mensagens com histórico do usuário ───────────────────────────────
+    function montarMensagens(historico, pergunta) {
+        const mensagens = [{ role: "system", content: SYSTEM_PROMPT }];
 
         for (const item of historico) {
             mensagens.push({ role: "user",      content: item.pergunta });
@@ -98,36 +102,53 @@ module.exports = (client) => {
             content: `${pergunta}\n\n(responda em no máximo 1500 caracteres)`,
         });
 
-        // Tenta API 1 primeiro
-        let resposta = null;
+        return mensagens;
+    }
 
+    // ── Chama a IA com fallback automático ─────────────────────────────────────
+    async function chamarIA(mensagens) {
+        // Tenta API 1
         try {
             const r1 = await api1.chat.completions.create({
                 model: "meta-llama/llama-3.3-70b-instruct:free",
                 messages: mensagens,
-                temperature: 0.9,
+                temperature: 0.92,
             });
-            resposta = r1.choices?.[0]?.message?.content;
+            const resposta = r1.choices?.[0]?.message?.content;
+            if (resposta) return resposta;
         } catch (err1) {
-            console.log("⚠️ API 1 falhou, tentando API 2...", err1?.message);
+            console.log("⚠️ API 1 falhou:", err1?.message);
         }
 
-        // Fallback para API 2
-        if (!resposta) {
-            try {
-                const r2 = await api2.chat.completions.create({
-                    model: "llama-3.3-70b-versatile",
-                    messages: mensagens,
-                    temperature: 0.9,
-                });
-                resposta = r2.choices?.[0]?.message?.content;
-            } catch (err2) {
-                console.error("❌ IA falhou nas duas APIs:", err2?.message);
-                throw new Error("IA indisponível no momento");
-            }
+        // Tenta API 2 (fallback)
+        try {
+            const r2 = await api2.chat.completions.create({
+                model: "llama-3.3-70b-versatile",
+                messages: mensagens,
+                temperature: 0.92,
+            });
+            const resposta = r2.choices?.[0]?.message?.content;
+            if (resposta) return resposta;
+        } catch (err2) {
+            console.error("❌ IA falhou nas duas APIs:", err2?.message);
         }
 
-        // Salva no histórico (máx 10 por usuário)
+        throw new Error("IA indisponível no momento");
+    }
+
+    // ── Pergunta com memória por usuário (!ic) ─────────────────────────────────
+    async function perguntarComMemoria(userId, pergunta) {
+        const memoria = carregarMemoria();
+
+        if (!memoria[userId]) {
+            memoria[userId] = [];
+        }
+
+        const historico = memoria[userId];
+        const mensagens = montarMensagens(historico, pergunta);
+        const resposta  = await chamarIA(mensagens);
+
+        // Salva no histórico (máx 10)
         historico.push({ pergunta, resposta });
         if (historico.length > 10) {
             historico.splice(0, historico.length - 10);
@@ -137,7 +158,13 @@ module.exports = (client) => {
         return resposta;
     }
 
-    // ── Envio com suporte a mensagens longas ───────────────────────────────────
+    // ── Pergunta sem memória (!pergunta / !p / !c) ─────────────────────────────
+    async function perguntarSemMemoria(pergunta) {
+        const mensagens = montarMensagens([], pergunta);
+        return chamarIA(mensagens);
+    }
+
+    // ── Envia resposta com suporte a mensagens longas ──────────────────────────
     async function enviarResposta(message, resposta) {
         if (resposta.length > 1900) {
             const partes = resposta.match(/[\s\S]{1,1900}/g);
@@ -150,7 +177,7 @@ module.exports = (client) => {
         }
     }
 
-    // ── Listener de mensagens ──────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────────────
     client.on("messageCreate", async (message) => {
         if (message.author.bot) return;
         if (!canaisPermitidos.includes(message.channel.id)) return;
@@ -158,37 +185,40 @@ module.exports = (client) => {
         const args    = message.content.split(" ");
         const comando = args[0].toLowerCase();
 
-        // ── !ic — comando principal com memória por usuário ────────────────────
+        // ── !ic — pergunta COM memória ─────────────────────────────────────────
         if (comando === "!ic") {
             const pergunta = args.slice(1).join(" ").trim();
 
             if (!pergunta) {
                 return message.reply(
-                    "mano... você chamou a minha atenção e não perguntou nada?? 💀\n" +
+                    "mano... você me chamou e não perguntou nada?? isso é abandono emocional 💀\n" +
                     "**Exemplo:** `!ic qual a capital do Brasil?`\n" +
-                    "*(dica: é Brasília, mas posso filosofar sobre isso por horas)*"
+                    "*(dica: é Brasília, mas posso fazer uma análise filosófica sobre isso se quiser)*"
                 );
             }
 
             try {
                 await message.channel.sendTyping();
-                const resposta = await perguntarIA(message.author.id, pergunta);
+                const resposta = await perguntarComMemoria(message.author.id, pergunta);
 
                 if (!resposta) {
-                    return message.reply("❌ nada saiu da minha cabeça. Isso é inédito.");
+                    return message.reply("❌ nada saiu da minha cabeça. Isso é historicamente inédito.");
                 }
 
                 await enviarResposta(message, resposta);
 
             } catch (err) {
-                console.error("❌ ERRO IA FINAL:", err.message || err);
+                console.error("❌ ERRO IA (!ic):", err.message || err);
                 return message.reply(
-                    "❌ cara a IA travou feio. Tipo aquela sensação de ter a palavra na ponta da língua mas pior."
+                    "❌ cara a IA travou feio. Tipo aquela sensação de ter a palavra na ponta da língua mas pior.\n" +
+                    "Tenta de novo daqui a pouco?"
                 );
             }
+
+            return;
         }
 
-        // ── !pergunta / !p / !c — comandos legados (sem memória) ──────────────
+        // ── !pergunta / !p / !c — sem memória (legado) ────────────────────────
         if (["!pergunta", "!p", "!c"].includes(comando)) {
             const pergunta = args.slice(1).join(" ").trim();
 
@@ -202,38 +232,7 @@ module.exports = (client) => {
 
             try {
                 await message.channel.sendTyping();
-
-                // Sem histórico — resposta avulsa
-                const memoria  = {};
-                const mensagens = [
-                    { role: "system", content: SYSTEM_PROMPT },
-                    {
-                        role: "user",
-                        content: `${pergunta}\n\n(responda em no máximo 1500 caracteres)`,
-                    },
-                ];
-
-                let resposta = null;
-
-                try {
-                    const r1 = await api1.chat.completions.create({
-                        model: "meta-llama/llama-3.3-70b-instruct:free",
-                        messages: mensagens,
-                        temperature: 0.9,
-                    });
-                    resposta = r1.choices?.[0]?.message?.content;
-                } catch {
-                    console.log("⚠️ API 1 falhou nos comandos legados, tentando API 2...");
-                }
-
-                if (!resposta) {
-                    const r2 = await api2.chat.completions.create({
-                        model: "llama-3.3-70b-versatile",
-                        messages: mensagens,
-                        temperature: 0.9,
-                    });
-                    resposta = r2.choices?.[0]?.message?.content;
-                }
+                const resposta = await perguntarSemMemoria(pergunta);
 
                 if (!resposta) {
                     return message.reply("❌ Não consegui gerar uma resposta.");
@@ -247,40 +246,49 @@ module.exports = (client) => {
                     "❌ A IA está indisponível no momento. Tente novamente mais tarde."
                 );
             }
+
+            return;
         }
 
         // ── !limparmemoria — apaga histórico do usuário ────────────────────────
         if (comando === "!limparmemoria") {
             const memoria = carregarMemoria();
-            if (memoria[message.author.id]) {
+
+            if (memoria[message.author.id]?.length > 0) {
                 delete memoria[message.author.id];
                 salvarMemoria(memoria);
                 return message.reply(
-                    "🧹 memória DELETADA. Recomeço total. Você é um estranho pra mim agora.\n" +
-                    "*(não sinto nada. ou sinto? filosofia demais pra um bot)*"
+                    "🧹 memória DELETADA. Você é um estranho pra mim agora.\n" +
+                    "*(não sinto nada. ou sinto? filosofia demais pra um bot com problemas de foco)*"
                 );
             } else {
                 return message.reply(
-                    "hmm... não tinha nada pra apagar. Você é um fantasma no meu histórico 👻"
+                    "hmm... não tinha nada pra apagar. Você é um fantasma no meu histórico 👻\n" +
+                    "usa `!ic` pra começar a existir pra mim"
                 );
             }
         }
 
-        // ── !memória — mostra quantas conversas estão salvas ──────────────────
+        // ── !memoria — mostra resumo do histórico ──────────────────────────────
         if (comando === "!memoria") {
-            const memoria  = carregarMemoria();
+            const memoria   = carregarMemoria();
             const historico = memoria[message.author.id] || [];
             const total     = historico.length;
 
             if (total === 0) {
                 return message.reply(
                     "📭 você não tem NADA salvo na minha memória ainda.\n" +
-                    "Use `!ic` pra começar uma conversa e eu vou lembrar!"
+                    "Use `!ic` pra começar uma conversa e eu vou guardar — prometo que não vou esquecer.\n" +
+                    "*(mentira, posso esquecer, mas o json não esquece)*"
                 );
             }
 
             const resumo = historico
-                .map((item, i) => `**${i + 1}.** ${item.pergunta.slice(0, 60)}${item.pergunta.length > 60 ? "..." : ""}`)
+                .map((item, i) => {
+                    const preview = item.pergunta.slice(0, 55);
+                    const reticencias = item.pergunta.length > 55 ? "..." : "";
+                    return `**${i + 1}.** ${preview}${reticencias}`;
+                })
                 .join("\n");
 
             return message.reply(
@@ -295,36 +303,37 @@ module.exports = (client) => {
                 .setTitle("🤖 Comandos da IA Caótica")
                 .setColor(0xff6b35)
                 .setDescription(
-                    "oi, sou uma IA com problemas de foco mas muito boa vontade (às vezes)"
+                    "oi sou uma IA com problemas de foco mas muita boa vontade *(às vezes)*\n" +
+                    "posso responder perguntas, entrar em hiperfoco sobre polvos, ou ambos ao mesmo tempo"
                 )
                 .addFields(
                     {
                         name: "🧠 !ic [pergunta]",
                         value:
-                            "Faz uma pergunta COM memória! Lembro das suas últimas 10 conversas.\n" +
-                            "`!ic qual o sentido da vida?`",
+                            "Pergunta **COM memória**. Lembro das suas últimas 10 conversas e posso fazer referência a elas.\n" +
+                            "Exemplo: `!ic qual o sentido da vida?`",
                     },
                     {
                         name: "❓ !pergunta / !p / !c [pergunta]",
                         value:
-                            "Pergunta avulsa, SEM memória. Cada vez que uso como se fosse a primeira.\n" +
-                            "`!p o que é JavaScript?`",
+                            "Pergunta **SEM memória**. Cada vez que falo como se fosse a primeira.\n" +
+                            "Exemplo: `!p o que é JavaScript?`",
                     },
                     {
                         name: "🧹 !limparmemoria",
-                        value: "Apaga TODO o histórico que tenho de você. Recomeço total.",
+                        value: "Apaga **todo** o histórico que tenho de você. Recomeço total. Você vira um desconhecido.",
                     },
                     {
                         name: "📋 !memoria",
-                        value: "Mostra quantas e quais conversas estão salvas na minha cabeça.",
+                        value: "Mostra quantas e quais conversas estão salvas na minha cabeça agora.",
                     },
                     {
                         name: "❓ !ajudaia",
-                        value: "Mostra essa mensagem aqui que você já tá vendo.",
+                        value: "Mostra essa mensagem que você já tá lendo. Loop eterno.",
                     }
                 )
                 .setFooter({
-                    text: "Powered by LiteRouter + Groq • personalidade: caos puro",
+                    text: "Powered by LiteRouter + Groq • personalidade: caos calibrado",
                 });
 
             await message.reply({ embeds: [embed] });
