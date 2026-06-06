@@ -5,6 +5,7 @@ const {
   AudioPlayerStatus,
   VoiceConnectionStatus,
   entersState,
+  getVoiceConnection,
 } = require("@discordjs/voice");
 const playdl = require("play-dl");
 
@@ -12,6 +13,7 @@ const playdl = require("play-dl");
    MUSIC SYSTEM
 ========================= */
 
+const TARGET_CHANNEL = "1476321416470335659";
 const queues = new Map();
 
 async function getVideoInfo(query) {
@@ -61,13 +63,31 @@ function getQueue(guildId) {
   return queues.get(guildId);
 }
 
+function reconectarAFK(guild) {
+  const afkChannel = guild.channels.cache.get(TARGET_CHANNEL);
+  if (!afkChannel) return;
+
+  joinVoiceChannel({
+    channelId: afkChannel.id,
+    guildId: guild.id,
+    adapterCreator: guild.voiceAdapterCreator,
+    selfDeaf: true,
+    selfMute: true,
+  });
+
+  console.log("✅ Bot reconectado no canal AFK.");
+}
+
 async function playSong(message, queue) {
   if (queue.songs.length === 0) {
     queue.playing = false;
+
+    // Sai da call de música e volta pro AFK depois de 30s sem música
     setTimeout(() => {
       if (queue.songs.length === 0 && queue.connection) {
         queue.connection.destroy();
         queues.delete(message.guild.id);
+        reconectarAFK(message.guild);
       }
     }, 30_000);
     return;
@@ -140,13 +160,17 @@ module.exports = (client) => {
 
         const queue = getQueue(message.guild.id);
 
-        // Conecta na call se ainda não estiver
+        // Destrói conexão AFK existente antes de conectar para música
         if (!queue.connection) {
+          const existingConnection = getVoiceConnection(message.guild.id);
+          if (existingConnection) existingConnection.destroy();
+
           queue.connection = joinVoiceChannel({
             channelId: voiceChannel.id,
             guildId: message.guild.id,
             adapterCreator: message.guild.voiceAdapterCreator,
-            selfDeaf: true,
+            selfDeaf: false, // 👈 sem selfDeaf pra conseguir tocar
+            selfMute: false,
           });
 
           queue.player = createAudioPlayer();
@@ -206,6 +230,9 @@ module.exports = (client) => {
       queue.connection.destroy();
       queues.delete(message.guild.id);
       message.reply("⏹️ Música parada e fila limpa!");
+
+      // Volta pro canal AFK após parar
+      reconectarAFK(message.guild);
     }
 
     // ========== !queue / !q - VER FILA ==========
