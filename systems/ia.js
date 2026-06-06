@@ -287,8 +287,8 @@ module.exports = (client) => {
             }
         }
 
-        // ── !pergunta / !p / !c — comandos legados (sem memória) ──────────────
-        if (["!pergunta", "!p", "!c"].includes(comando)) {
+        // ── !pergunta / !c — comandos legados (sem memória) ──────────────
+        if (["!pergunta", "!c"].includes(comando)) {
             const pergunta = args.slice(1).join(" ").trim();
 
             if (!pergunta) {
@@ -404,10 +404,10 @@ module.exports = (client) => {
                             "`!ic qual o sentido da vida?`",
                     },
                     {
-                        name: "❓ !pergunta / !p / !c [pergunta]",
+                        name: "❓ !pergunta / !c [pergunta]",
                         value:
                             "Pergunta avulsa, SEM memória. Cada vez que uso como se fosse a primeira.\n" +
-                            "`!p o que é JavaScript?`",
+                            "`!c o que é JavaScript?`",
                     },
                     {
                         name: "🧹 !limparmemoria",
