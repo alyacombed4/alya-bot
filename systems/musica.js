@@ -363,9 +363,15 @@ async function buildSong(track, requestedBy) {
 }
 
 /* ─────────────────────────────────────────────
-   STREAMING — InnerTube nativo (sem ytdl-core)
-   Evita completamente o erro 429.
+   STREAMING — InnerTube nativo sem login
+   Estratégia:
+     1. getInfo() → pega lista de formatos disponíveis
+     2. Escolhe formato de áudio sem restrição de login
+     3. Faz fetch direto da URL com os headers do InnerTube
+     4. Passa o stream para o FFmpeg via StreamType.Arbitrary
 ───────────────────────────────────────────── */
+
+const { Readable } = require("stream");
 
 /**
  * Extrai o ID de um link do YouTube.
@@ -382,25 +388,58 @@ function extractYouTubeId(url) {
 }
 
 /**
- * Cria um AudioResource usando o stream nativo do youtubei.js.
+ * Cria um AudioResource usando a InnerTube API do youtubei.js.
+ *
+ * Por que não usar yt.download() diretamente?
+ *   Alguns formatos retornados pelo InnerTube são marcados como
+ *   "login required" quando o cliente padrão é o WEB. Usar o
+ *   cliente ANDROID ou IOS contorna isso porque o YouTube serve
+ *   URLs de stream diretas nesses clientes sem exigir autenticação.
+ *
  * @param {string} url
  * @returns {Promise<import("@discordjs/voice").AudioResource>}
  */
 async function createYouTubeResource(url) {
-  const yt = await getInnertube();
   const videoId = extractYouTubeId(url);
   if (!videoId) throw new Error(`URL inválida: ${url}`);
 
-  // Usa o streaming nativo do InnerTube — sem requisições à API pública do YT
-  const stream = await yt.download(videoId, {
-    type: "audio",          // só áudio
-    quality: "best",        // melhor qualidade disponível
-    format: "any",          // opus/webm ou aac/mp4, o que estiver disponível
+  // Cria instância com cliente ANDROID — retorna URLs de stream sem login
+  const yt = await Innertube.create({
+    client_type: "ANDROID",          // contorna "login required"
+    generate_session_locally: true,
+    retrieve_player: true,
   });
 
-  // Converte o ReadableStream do InnerTube para um Node.js Readable
-  const { Readable } = require("stream");
-  const nodeStream = Readable.fromWeb(stream);
+  const info = await yt.getBasicInfo(videoId, "ANDROID");
+
+  // Pega o melhor formato de áudio disponível (sem vídeo)
+  const format = info.chooseFormat({
+    type: "audio",
+    quality: "best",
+  });
+
+  if (!format) throw new Error("Nenhum formato de áudio disponível.");
+
+  // Decodifica a URL do stream (o InnerTube pode retornar URLs cifradas)
+  const streamUrl = format.decipher(yt.session.player);
+
+  // Faz fetch com headers adequados para não ser bloqueado
+  const response = await fetch(streamUrl, {
+    headers: {
+      "User-Agent":
+        "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+      "Accept-Language": "en-US,en;q=0.9",
+      Range: "bytes=0-",
+    },
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Fetch do stream falhou: HTTP ${response.status}`);
+  }
+
+  // Converte Web ReadableStream → Node.js Readable
+  const nodeStream = Readable.fromWeb(response.body);
 
   return createAudioResource(nodeStream, {
     inputType: StreamType.Arbitrary,
