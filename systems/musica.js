@@ -1,13 +1,18 @@
 /**
- * Sistema de Música para Discord.js v14
- * ─────────────────────────────────────
- * Dependências necessárias:
- *   npm install @discordjs/voice youtubei.js @distube/ytdl-core ffmpeg-static sodium-native
+ * Sistema de Música — Discord.js v14
+ * ════════════════════════════════════════════════════════
+ * Fluxo de busca:
+ *   1. Spotify API (Client Credentials) → metadados precisos
+ *   2. youtubei.js (InnerTube) → busca "Artista - Título" no YT
+ *   3. youtubei.js → stream de áudio (sem ytdl, sem 429)
  *
- * Por que youtubei.js?
- *   O play-dl usa a API pública do YouTube, que passou a exigir login (cookie) em 2024.
- *   O youtubei.js usa a InnerTube API (a mesma que o app oficial do YouTube usa),
- *   o que contorna completamente o bloqueio "Sign in to confirm you're not a bot".
+ * Variáveis de ambiente necessárias (.env):
+ *   SPOTIFY_CLIENT_ID=...
+ *   SPOTIFY_CLIENT_SECRET=...
+ *
+ * Dependências:
+ *   npm install @discordjs/voice youtubei.js ffmpeg-static sodium-native
+ * ════════════════════════════════════════════════════════
  */
 
 "use strict";
@@ -24,18 +29,18 @@ const {
 } = require("@discordjs/voice");
 
 const { Innertube } = require("youtubei.js");
-const ytdl = require("@distube/ytdl-core");
 
 /* ─────────────────────────────────────────────
    CONFIGURAÇÃO
 ───────────────────────────────────────────── */
-const AFK_CHANNEL_ID = "1476321416470335659"; // Canal AFK para o bot aguardar
-const IDLE_TIMEOUT_MS = 30_000;               // Tempo sem música antes de voltar ao AFK
-const MAX_RECONNECT_ATTEMPTS = 3;             // Tentativas de reconexão de voz
+const AFK_CHANNEL_ID   = "1476321416470335659";
+const IDLE_TIMEOUT_MS  = 30_000;
+
+const SPOTIFY_CLIENT_ID     = process.env.SPOTIFY_CLIENT_ID;
+const SPOTIFY_CLIENT_SECRET = process.env.SPOTIFY_CLIENT_SECRET;
 
 /* ─────────────────────────────────────────────
    ESTADO GLOBAL
-   Cada guild tem sua própria fila isolada.
 ───────────────────────────────────────────── */
 
 /** @type {Map<string, GuildQueue>} */
@@ -43,42 +48,323 @@ const queues = new Map();
 
 /**
  * @typedef {Object} Song
- * @property {string} title
- * @property {string} url
- * @property {number} duration
- * @property {string} requestedBy
+ * @property {string} title        Título formatado "Artista - Música"
+ * @property {string} url          URL do YouTube
+ * @property {number} duration     Duração em segundos
+ * @property {string} requestedBy  Tag do usuário
+ * @property {string} [thumb]      Thumbnail do Spotify (opcional)
  */
 
 /**
  * @typedef {Object} GuildQueue
- * @property {Song[]} songs
- * @property {import("@discordjs/voice").AudioPlayer|null} player
- * @property {import("@discordjs/voice").VoiceConnection|null} connection
- * @property {boolean} playing
+ * @property {Song[]}    songs
+ * @property {import("@discordjs/voice").AudioPlayer|null}      player
+ * @property {import("@discordjs/voice").VoiceConnection|null}  connection
+ * @property {boolean}   playing
  * @property {NodeJS.Timeout|null} idleTimer
- * @property {boolean} destroyed
+ * @property {boolean}   destroyed
  */
 
 /* ─────────────────────────────────────────────
-   INNERTUBE (youtubei.js) – inicialização lazy
-   Criamos uma única instância para toda a vida
-   do processo, economizando memória e evitando
-   rate-limits de autenticação.
+   INNERTUBE — instância única reutilizável
 ───────────────────────────────────────────── */
 let _innertube = null;
 
 async function getInnertube() {
   if (!_innertube) {
-    _innertube = await Innertube.create({
-      // Sem cookies: a InnerTube API funciona sem autenticação para streaming
-      generate_session_locally: true,
-    });
+    _innertube = await Innertube.create({ generate_session_locally: true });
   }
   return _innertube;
 }
 
 /* ─────────────────────────────────────────────
-   BUSCA DE INFORMAÇÕES DE VÍDEO
+   SPOTIFY — autenticação Client Credentials
+   Token é cacheado e renovado automaticamente.
+───────────────────────────────────────────── */
+let _spotifyToken = null;
+let _spotifyTokenExpiry = 0;
+
+async function getSpotifyToken() {
+  if (_spotifyToken && Date.now() < _spotifyTokenExpiry) return _spotifyToken;
+
+  if (!SPOTIFY_CLIENT_ID || !SPOTIFY_CLIENT_SECRET) {
+    throw new Error("SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET não definidos no .env");
+  }
+
+  const credentials = Buffer.from(`${SPOTIFY_CLIENT_ID}:${SPOTIFY_CLIENT_SECRET}`).toString("base64");
+
+  const res = await fetch("https://accounts.spotify.com/api/token", {
+    method: "POST",
+    headers: {
+      Authorization: `Basic ${credentials}`,
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: "grant_type=client_credentials",
+    signal: AbortSignal.timeout(10_000),
+  });
+
+  if (!res.ok) throw new Error(`Spotify auth falhou: ${res.status}`);
+
+  const data = await res.json();
+  _spotifyToken = data.access_token;
+  // Renova 60s antes de expirar
+  _spotifyTokenExpiry = Date.now() + (data.expires_in - 60) * 1000;
+
+  return _spotifyToken;
+}
+
+/* ─────────────────────────────────────────────
+   SPOTIFY — resolução de URLs e pesquisa
+───────────────────────────────────────────── */
+
+/**
+ * Extrai o tipo e ID de uma URL do Spotify.
+ * Suporta track, album e playlist.
+ * @param {string} url
+ * @returns {{ type: string, id: string }|null}
+ */
+function parseSpotifyUrl(url) {
+  const match = url.match(/spotify\.com\/(track|album|playlist)\/([A-Za-z0-9]+)/);
+  if (!match) return null;
+  return { type: match[1], id: match[2] };
+}
+
+/**
+ * Busca metadados de uma faixa do Spotify.
+ * @param {string} trackId
+ * @returns {Promise<{ title: string, artist: string, duration: number, thumb: string }|null>}
+ */
+async function getSpotifyTrack(trackId) {
+  const token = await getSpotifyToken();
+  const res = await fetch(`https://api.spotify.com/v1/tracks/${trackId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return {
+    title: data.name,
+    artist: data.artists.map((a) => a.name).join(", "),
+    duration: Math.floor(data.duration_ms / 1000),
+    thumb: data.album?.images?.[0]?.url ?? null,
+  };
+}
+
+/**
+ * Busca as faixas de um álbum do Spotify (máx 50).
+ * @param {string} albumId
+ * @returns {Promise<Array<{ title: string, artist: string, duration: number, thumb: string }>>}
+ */
+async function getSpotifyAlbumTracks(albumId) {
+  const token = await getSpotifyToken();
+
+  // Pega capa do álbum separadamente
+  const albumRes = await fetch(`https://api.spotify.com/v1/albums/${albumId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  const albumData = albumRes.ok ? await albumRes.json() : null;
+  const thumb = albumData?.images?.[0]?.url ?? null;
+  const albumArtist = albumData?.artists?.[0]?.name ?? "";
+
+  const res = await fetch(`https://api.spotify.com/v1/albums/${albumId}/tracks?limit=50`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+
+  return data.items.map((t) => ({
+    title: t.name,
+    artist: t.artists.map((a) => a.name).join(", ") || albumArtist,
+    duration: Math.floor(t.duration_ms / 1000),
+    thumb,
+  }));
+}
+
+/**
+ * Busca as faixas de uma playlist do Spotify (máx 50).
+ * @param {string} playlistId
+ * @returns {Promise<Array<{ title: string, artist: string, duration: number, thumb: string }>>}
+ */
+async function getSpotifyPlaylistTracks(playlistId) {
+  const token = await getSpotifyToken();
+  const res = await fetch(`https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) return [];
+  const data = await res.json();
+
+  return data.items
+    .filter((item) => item?.track?.type === "track")
+    .map((item) => ({
+      title: item.track.name,
+      artist: item.track.artists.map((a) => a.name).join(", "),
+      duration: Math.floor(item.track.duration_ms / 1000),
+      thumb: item.track.album?.images?.[0]?.url ?? null,
+    }));
+}
+
+/**
+ * Pesquisa uma música no Spotify por nome e retorna a melhor correspondência.
+ * @param {string} query
+ * @returns {Promise<{ title: string, artist: string, duration: number, thumb: string }|null>}
+ */
+async function searchSpotify(query) {
+  const token = await getSpotifyToken();
+  const q = encodeURIComponent(query);
+  const res = await fetch(`https://api.spotify.com/v1/search?q=${q}&type=track&limit=1`, {
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const track = data.tracks?.items?.[0];
+  if (!track) return null;
+  return {
+    title: track.name,
+    artist: track.artists.map((a) => a.name).join(", "),
+    duration: Math.floor(track.duration_ms / 1000),
+    thumb: track.album?.images?.[0]?.url ?? null,
+  };
+}
+
+/* ─────────────────────────────────────────────
+   YOUTUBE — busca pelo InnerTube
+───────────────────────────────────────────── */
+
+/**
+ * Encontra o vídeo do YouTube mais relevante para "Artista - Título".
+ * @param {string} artist
+ * @param {string} title
+ * @param {number} expectedDuration  Duração esperada em segundos (filtra ao vivo/covers)
+ * @returns {Promise<{ url: string, ytTitle: string }|null>}
+ */
+async function findOnYouTube(artist, title, expectedDuration) {
+  const yt = await getInnertube();
+  const query = `${artist} - ${title} official audio`;
+
+  try {
+    const results = await yt.search(query, { type: "video" });
+    const videos = results.videos ?? [];
+
+    if (videos.length === 0) return null;
+
+    // Prefere vídeo cuja duração seja próxima da esperada (±15s)
+    // para evitar pegar versões ao vivo ou remixes longos
+    const best =
+      expectedDuration > 0
+        ? videos.find((v) => {
+            const sec =
+              typeof v.duration?.seconds === "number"
+                ? v.duration.seconds
+                : parseDurationText(v.duration?.text ?? "");
+            return Math.abs(sec - expectedDuration) <= 15;
+          }) ?? videos[0]
+        : videos[0];
+
+    return {
+      url: `https://www.youtube.com/watch?v=${best.id}`,
+      ytTitle: best.title?.text ?? title,
+    };
+  } catch (err) {
+    console.error("[Music] Erro na busca YouTube:", err.message);
+    return null;
+  }
+}
+
+/* ─────────────────────────────────────────────
+   RESOLUÇÃO PRINCIPAL DE QUERY
+   Retorna Song ou array de Song (para álbuns/playlists)
+───────────────────────────────────────────── */
+
+/**
+ * Converte qualquer query em uma ou mais Song prontas para a fila.
+ * @param {string} query
+ * @param {string} requestedBy
+ * @returns {Promise<Song[]>}
+ */
+async function resolveQuery(query, requestedBy) {
+  // ── Link do Spotify ──────────────────────────────────────────────────────
+  if (query.includes("spotify.com")) {
+    const parsed = parseSpotifyUrl(query);
+    if (!parsed) return [];
+
+    if (parsed.type === "track") {
+      const track = await getSpotifyTrack(parsed.id);
+      if (!track) return [];
+      return [await buildSong(track, requestedBy)].filter(Boolean);
+    }
+
+    if (parsed.type === "album") {
+      const tracks = await getSpotifyAlbumTracks(parsed.id);
+      const songs = await Promise.all(tracks.map((t) => buildSong(t, requestedBy)));
+      return songs.filter(Boolean);
+    }
+
+    if (parsed.type === "playlist") {
+      const tracks = await getSpotifyPlaylistTracks(parsed.id);
+      const songs = await Promise.all(tracks.map((t) => buildSong(t, requestedBy)));
+      return songs.filter(Boolean);
+    }
+
+    return [];
+  }
+
+  // ── Pesquisa por nome (usa Spotify para enriquecer, depois acha no YT) ──
+  const spotifyTrack = await searchSpotify(query);
+
+  if (spotifyTrack) {
+    const song = await buildSong(spotifyTrack, requestedBy);
+    return song ? [song] : [];
+  }
+
+  // ── Fallback: busca direta no YouTube sem Spotify ────────────────────────
+  console.warn("[Music] Spotify não retornou resultado, caindo para busca direta no YT.");
+  const yt = await getInnertube();
+  try {
+    const results = await yt.search(query, { type: "video" });
+    const first = results.videos?.[0];
+    if (!first) return [];
+    const duration =
+      typeof first.duration?.seconds === "number"
+        ? first.duration.seconds
+        : parseDurationText(first.duration?.text ?? "");
+    return [{
+      title: first.title?.text ?? "Título desconhecido",
+      url: `https://www.youtube.com/watch?v=${first.id}`,
+      duration,
+      requestedBy,
+      thumb: null,
+    }];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Constrói um objeto Song completo a partir dos metadados do Spotify.
+ * Localiza o vídeo correspondente no YouTube.
+ * @param {{ title: string, artist: string, duration: number, thumb: string|null }} track
+ * @param {string} requestedBy
+ * @returns {Promise<Song|null>}
+ */
+async function buildSong(track, requestedBy) {
+  const yt = await findOnYouTube(track.artist, track.title, track.duration);
+  if (!yt) return null;
+  return {
+    title: `${track.artist} - ${track.title}`,
+    url: yt.url,
+    duration: track.duration,
+    requestedBy,
+    thumb: track.thumb,
+  };
+}
+
+/* ─────────────────────────────────────────────
+   STREAMING — InnerTube nativo (sem ytdl-core)
+   Evita completamente o erro 429.
 ───────────────────────────────────────────── */
 
 /**
@@ -91,143 +377,33 @@ function extractYouTubeId(url) {
     const u = new URL(url);
     if (u.hostname === "youtu.be") return u.pathname.slice(1);
     if (u.hostname.includes("youtube.com")) return u.searchParams.get("v");
-  } catch {
-    // URL inválida
-  }
+  } catch { /* ignorado */ }
   return null;
 }
 
 /**
- * Resolve qualquer query (nome, link YT, link Spotify) para um objeto Song.
- * @param {string} query
- * @returns {Promise<Song|null>}
- */
-async function resolveQuery(query) {
-  const yt = await getInnertube();
-
-  // ── Spotify: extrai nome do faixa e pesquisa no YouTube ──
-  if (query.includes("spotify.com")) {
-    try {
-      // Tenta extrair o nome via fetch simples da URL pública (Open Graph)
-      const trackName = await extractSpotifyTitle(query);
-      if (!trackName) throw new Error("Não foi possível extrair título do Spotify");
-      return resolveQuery(trackName); // Recursão com o nome
-    } catch (err) {
-      console.error("[Music] Erro Spotify:", err.message);
-      return null;
-    }
-  }
-
-  // ── Link direto do YouTube ──
-  const videoId = extractYouTubeId(query);
-  if (videoId) {
-    try {
-      const info = await yt.getBasicInfo(videoId);
-      const details = info.basic_info;
-      return {
-        url: `https://www.youtube.com/watch?v=${videoId}`,
-        title: details.title ?? "Título desconhecido",
-        duration: details.duration ?? 0,
-      };
-    } catch (err) {
-      console.error("[Music] Erro ao obter info do YouTube:", err.message);
-      return null;
-    }
-  }
-
-  // ── Pesquisa por nome ──
-  try {
-    const results = await yt.search(query, { type: "video" });
-    const first = results.videos?.[0];
-    if (!first) return null;
-
-    const id = first.id;
-    const duration =
-      typeof first.duration?.seconds === "number"
-        ? first.duration.seconds
-        : parseDurationText(first.duration?.text ?? "");
-
-    return {
-      url: `https://www.youtube.com/watch?v=${id}`,
-      title: first.title?.text ?? "Título desconhecido",
-      duration,
-    };
-  } catch (err) {
-    console.error("[Music] Erro na pesquisa:", err.message);
-    return null;
-  }
-}
-
-/**
- * Faz um fetch leve da página do Spotify para extrair o título via Open Graph.
- * Não depende de nenhuma lib do Spotify.
- * @param {string} spotifyUrl
- * @returns {Promise<string|null>}
- */
-async function extractSpotifyTitle(spotifyUrl) {
-  try {
-    const res = await fetch(spotifyUrl, {
-      headers: { "User-Agent": "Mozilla/5.0" },
-      signal: AbortSignal.timeout(8_000),
-    });
-    const html = await res.text();
-    const match = html.match(/<meta property="og:title" content="([^"]+)"/);
-    return match ? decodeHTMLEntities(match[1]) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Decodifica entidades HTML básicas.
- * @param {string} text
- * @returns {string}
- */
-function decodeHTMLEntities(text) {
-  return text
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'");
-}
-
-/**
- * Converte "4:32" ou "1:02:10" para segundos.
- * @param {string} text
- * @returns {number}
- */
-function parseDurationText(text) {
-  if (!text) return 0;
-  const parts = text.split(":").map(Number);
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  return 0;
-}
-
-/* ─────────────────────────────────────────────
-   STREAMING DE ÁUDIO
-   Usa @distube/ytdl-core que é mantido ativamente
-   e compatível com Node 22+.
-───────────────────────────────────────────── */
-
-/**
- * Cria um AudioResource a partir de uma URL do YouTube.
+ * Cria um AudioResource usando o stream nativo do youtubei.js.
  * @param {string} url
  * @returns {Promise<import("@discordjs/voice").AudioResource>}
  */
 async function createYouTubeResource(url) {
-  // highWaterMark alto evita stuttering em conexões lentas
-  const stream = ytdl(url, {
-    filter: "audioonly",
-    quality: "highestaudio",
-    highWaterMark: 1 << 25, // 32 MB
-    dlChunkSize: 0,
+  const yt = await getInnertube();
+  const videoId = extractYouTubeId(url);
+  if (!videoId) throw new Error(`URL inválida: ${url}`);
+
+  // Usa o streaming nativo do InnerTube — sem requisições à API pública do YT
+  const stream = await yt.download(videoId, {
+    type: "audio",          // só áudio
+    quality: "best",        // melhor qualidade disponível
+    format: "any",          // opus/webm ou aac/mp4, o que estiver disponível
   });
 
-  return createAudioResource(stream, {
+  // Converte o ReadableStream do InnerTube para um Node.js Readable
+  const { Readable } = require("stream");
+  const nodeStream = Readable.fromWeb(stream);
+
+  return createAudioResource(nodeStream, {
     inputType: StreamType.Arbitrary,
-    // inlineVolume: true, // descomente se quiser controle de volume no futuro
   });
 }
 
@@ -235,11 +411,7 @@ async function createYouTubeResource(url) {
    GERENCIAMENTO DE FILAS
 ───────────────────────────────────────────── */
 
-/**
- * Retorna (ou cria) a fila de um guild.
- * @param {string} guildId
- * @returns {GuildQueue}
- */
+/** @returns {GuildQueue} */
 function getQueue(guildId) {
   if (!queues.has(guildId)) {
     queues.set(guildId, {
@@ -254,27 +426,15 @@ function getQueue(guildId) {
   return queues.get(guildId);
 }
 
-/**
- * Remove e limpa completamente a fila de um guild.
- * @param {string} guildId
- */
 function destroyQueue(guildId) {
   const queue = queues.get(guildId);
   if (!queue) return;
-
   queue.destroyed = true;
   clearTimeout(queue.idleTimer);
-
-  if (queue.player) {
-    queue.player.removeAllListeners();
-    queue.player.stop(true);
-  }
-
-  if (queue.connection) {
-    queue.connection.removeAllListeners();
-    queue.connection.destroy();
-  }
-
+  queue.player?.removeAllListeners();
+  queue.player?.stop(true);
+  queue.connection?.removeAllListeners();
+  queue.connection?.destroy();
   queues.delete(guildId);
 }
 
@@ -282,19 +442,12 @@ function destroyQueue(guildId) {
    CANAL AFK
 ───────────────────────────────────────────── */
 
-/**
- * Reconecta o bot no canal AFK após encerrar a sessão de música.
- * @param {import("discord.js").Guild} guild
- */
 function reconnectToAFK(guild) {
   const afkChannel = guild.channels.cache.get(AFK_CHANNEL_ID);
   if (!afkChannel) return;
-
   try {
-    // Destrói conexão residual, se houver
     const existing = getVoiceConnection(guild.id);
     if (existing) existing.destroy();
-
     joinVoiceChannel({
       channelId: afkChannel.id,
       guildId: guild.id,
@@ -302,8 +455,7 @@ function reconnectToAFK(guild) {
       selfDeaf: true,
       selfMute: true,
     });
-
-    console.log("[Music] ✅ Bot reconectado no canal AFK.");
+    console.log("[Music] ✅ Reconectado no canal AFK.");
   } catch (err) {
     console.error("[Music] Erro ao reconectar AFK:", err.message);
   }
@@ -314,38 +466,30 @@ function reconnectToAFK(guild) {
 ───────────────────────────────────────────── */
 
 /**
- * Toca a próxima música da fila.
- * Esta função é a única responsável por avançar a fila —
- * isso evita chamadas duplicadas e race conditions.
- *
- * @param {import("discord.js").TextChannel} channel  Canal de texto para enviar mensagens
- * @param {import("discord.js").Guild}       guild
+ * @param {import("discord.js").TextBasedChannel} channel
+ * @param {import("discord.js").Guild} guild
  */
 async function playSong(channel, guild) {
   const queue = queues.get(guild.id);
-
-  // Fila destruída ou guild removida
   if (!queue || queue.destroyed) return;
 
-  // Fila vazia: inicia timer de idle e volta pro AFK
   if (queue.songs.length === 0) {
     queue.playing = false;
-
     clearTimeout(queue.idleTimer);
     queue.idleTimer = setTimeout(() => {
-      if (!queue || queue.songs.length === 0) {
+      const q = queues.get(guild.id);
+      if (!q || q.songs.length === 0) {
         destroyQueue(guild.id);
         reconnectToAFK(guild);
       }
     }, IDLE_TIMEOUT_MS);
-
     return;
   }
 
   const song = queue.songs[0];
   queue.playing = true;
 
-  // Remove listeners antigos para evitar duplicação
+  // Remove listeners antigos (evita duplicação)
   queue.player.removeAllListeners(AudioPlayerStatus.Idle);
   queue.player.removeAllListeners("error");
 
@@ -353,11 +497,12 @@ async function playSong(channel, guild) {
     const resource = await createYouTubeResource(song.url);
     queue.player.play(resource);
 
+    // Monta embed-like com thumbnail se disponível
+    const thumbLine = song.thumb ? `\n🖼️ ${song.thumb}` : "";
     channel.send(
-      `🎵 Tocando agora: **${song.title}** (${formatDuration(song.duration)})\n🔗 ${song.url}`
-    ).catch(() => {}); // Ignora erro de permissão de canal
+      `🎵 Tocando agora: **${song.title}** (${formatDuration(song.duration)})\n🔗 ${song.url}${thumbLine}`
+    ).catch(() => {});
 
-    // Avança para a próxima música quando terminar
     queue.player.once(AudioPlayerStatus.Idle, () => {
       if (!queue.destroyed) {
         queue.songs.shift();
@@ -365,7 +510,6 @@ async function playSong(channel, guild) {
       }
     });
 
-    // Erro no player: pula a música problemática
     queue.player.once("error", (err) => {
       console.error("[Music] Erro no player:", err.message);
       if (!queue.destroyed) {
@@ -379,8 +523,6 @@ async function playSong(channel, guild) {
     console.error("[Music] Erro ao criar stream:", err.message);
     channel.send("❌ Não foi possível tocar essa música, pulando...").catch(() => {});
     queue.songs.shift();
-
-    // Pequeno delay antes de tentar a próxima para evitar flood de erros
     setTimeout(() => playSong(channel, guild), 1_000);
   }
 }
@@ -389,11 +531,6 @@ async function playSong(channel, guild) {
    FORMATAÇÃO
 ───────────────────────────────────────────── */
 
-/**
- * Formata segundos como MM:SS ou HH:MM:SS.
- * @param {number} seconds
- * @returns {string}
- */
 function formatDuration(seconds) {
   if (!seconds || seconds <= 0) return "0:00";
   const h = Math.floor(seconds / 3600);
@@ -402,17 +539,29 @@ function formatDuration(seconds) {
   return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
+function parseDurationText(text) {
+  if (!text) return 0;
+  const parts = text.split(":").map(Number);
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  return 0;
+}
+
 /* ─────────────────────────────────────────────
    HANDLER DE COMANDOS
 ───────────────────────────────────────────── */
 
 module.exports = (client) => {
 
-  // Inicializa o Innertube assim que o bot ligar (warm-up)
-  client.once("ready", () => {
-    getInnertube().catch((err) =>
-      console.error("[Music] Falha ao inicializar Innertube:", err.message)
-    );
+  // Warm-up: inicializa Innertube e token do Spotify quando o bot ligar
+  client.once("ready", async () => {
+    try {
+      await getInnertube();
+      await getSpotifyToken();
+      console.log("[Music] ✅ Innertube e Spotify prontos.");
+    } catch (err) {
+      console.error("[Music] ⚠️  Falha no warm-up:", err.message);
+    }
   });
 
   client.on("messageCreate", async (message) => {
@@ -425,7 +574,8 @@ module.exports = (client) => {
     const guildId = message.guild.id;
 
     /* ══════════════════════════════════════
-       !p <query> — Tocar / Adicionar à fila
+       !p — Tocar / Adicionar à fila
+       Aceita: nome, link Spotify (track/album/playlist)
     ══════════════════════════════════════ */
     if (command === "p") {
       const voiceChannel = message.member?.voice?.channel;
@@ -435,28 +585,21 @@ module.exports = (client) => {
       const query = args.join(" ").trim();
       if (!query)
         return message.reply(
-          "❌ Informe o nome, link do YouTube ou Spotify.\nEx: `!p lofi hip hop`"
+          "❌ Informe o nome da música ou um link do Spotify.\nEx: `!p Blinding Lights` ou `!p https://open.spotify.com/track/...`"
         );
 
-      const searching = await message.reply("🔍 Pesquisando...");
+      const searching = await message.reply("🔍 Pesquisando no Spotify...");
 
       try {
-        const info = await resolveQuery(query);
-        if (!info) return searching.edit("❌ Nenhum resultado encontrado.");
+        const songs = await resolveQuery(query, message.author.tag);
 
-        /** @type {Song} */
-        const song = {
-          title: info.title,
-          url: info.url,
-          duration: info.duration || 0,
-          requestedBy: message.author.tag,
-        };
+        if (!songs.length)
+          return searching.edit("❌ Nenhum resultado encontrado.");
 
         const queue = getQueue(guildId);
 
-        // ── Estabelece conexão de voz se ainda não houver ──
+        // Conecta ao canal de voz se necessário
         if (!queue.connection) {
-          // Destroi conexão AFK residual
           const existing = getVoiceConnection(guildId);
           if (existing) existing.destroy();
 
@@ -470,49 +613,52 @@ module.exports = (client) => {
 
           const player = createAudioPlayer();
           connection.subscribe(player);
-
           queue.connection = connection;
           queue.player = player;
 
-          // Lida com desconexão inesperada
           connection.on(VoiceConnectionStatus.Disconnected, async () => {
             if (queue.destroyed) return;
-
             try {
-              // Tenta reconectar por até 5s
               await Promise.race([
                 entersState(connection, VoiceConnectionStatus.Signalling, 5_000),
                 entersState(connection, VoiceConnectionStatus.Connecting, 5_000),
               ]);
-              // Se chegou aqui, reconectou — continua normalmente
             } catch {
-              // Não reconectou: destrói tudo
-              console.warn("[Music] Conexão de voz perdida, destruindo fila.");
+              console.warn("[Music] Conexão perdida, destruindo fila.");
               destroyQueue(guildId);
             }
           });
 
-          // Limpa quando a conexão for destruída
           connection.once(VoiceConnectionStatus.Destroyed, () => {
             if (!queue.destroyed) destroyQueue(guildId);
           });
         }
 
-        queue.songs.push(song);
-        clearTimeout(queue.idleTimer); // Cancela timer de idle se havia um
+        // Adiciona à fila
+        for (const song of songs) queue.songs.push(song);
+        clearTimeout(queue.idleTimer);
 
-        if (queue.playing) {
-          await searching.edit(
-            `✅ **${song.title}** (${formatDuration(song.duration)}) adicionado à fila!\n📋 Posição: ${queue.songs.length}`
-          );
+        if (songs.length === 1) {
+          if (queue.playing) {
+            await searching.edit(
+              `✅ **${songs[0].title}** (${formatDuration(songs[0].duration)}) adicionado à fila!\n📋 Posição: ${queue.songs.length}`
+            );
+          } else {
+            await searching.edit("✅ Música encontrada! Iniciando...");
+            playSong(message.channel, message.guild);
+          }
         } else {
-          await searching.edit(`✅ Música encontrada! Iniciando...`);
-          playSong(message.channel, message.guild);
+          // Álbum ou playlist
+          const wasPlaying = queue.playing;
+          if (!wasPlaying) playSong(message.channel, message.guild);
+          await searching.edit(
+            `✅ **${songs.length} músicas** adicionadas à fila!\n▶️ ${songs[0].title}${songs.length > 1 ? `\n...e mais ${songs.length - 1}` : ""}`
+          );
         }
 
       } catch (err) {
         console.error("[Music] Erro no comando !p:", err);
-        searching.edit("❌ Ocorreu um erro ao processar sua solicitação. Tente novamente.").catch(() => {});
+        searching.edit("❌ Ocorreu um erro. Verifique as credenciais do Spotify no `.env`.").catch(() => {});
       }
     }
 
@@ -523,19 +669,17 @@ module.exports = (client) => {
       const queue = queues.get(guildId);
       if (!queue?.playing)
         return message.reply("❌ Nenhuma música tocando no momento.");
-
-      queue.player.stop(); // Dispara o evento Idle → playSong avança a fila
+      queue.player.stop();
       message.reply("⏭️ Música pulada!");
     }
 
     /* ══════════════════════════════════════
-       !stop — Parar tudo e limpar fila
+       !stop — Parar tudo
     ══════════════════════════════════════ */
     else if (command === "stop") {
       const queue = queues.get(guildId);
       if (!queue?.connection)
         return message.reply("❌ O bot não está em nenhum canal de voz.");
-
       destroyQueue(guildId);
       message.reply("⏹️ Música parada e fila limpa!");
       reconnectToAFK(message.guild);
@@ -555,15 +699,9 @@ module.exports = (client) => {
         )
         .join("\n");
 
-      // Discord tem limite de 2000 caracteres por mensagem
       const header = "📋 **Fila de músicas:**\n\n";
-      if (header.length + list.length <= 2000) {
-        message.reply(header + list);
-      } else {
-        // Trunca a lista se for muito longa
-        const truncated = list.slice(0, 1900 - header.length);
-        message.reply(header + truncated + "\n*(lista truncada)*");
-      }
+      const content = header + list;
+      message.reply(content.length <= 2000 ? content : content.slice(0, 1970) + "\n*(lista truncada)*");
     }
 
     /* ══════════════════════════════════════
@@ -573,9 +711,8 @@ module.exports = (client) => {
       const queue = queues.get(guildId);
       if (!queue?.playing)
         return message.reply("❌ Nenhuma música tocando no momento.");
-
-      const paused = queue.player.pause();
-      message.reply(paused ? "⏸️ Música pausada. Use `!resume` para continuar." : "❌ Não foi possível pausar.");
+      const ok = queue.player.pause();
+      message.reply(ok ? "⏸️ Pausado. Use `!resume` para continuar." : "❌ Não foi possível pausar.");
     }
 
     /* ══════════════════════════════════════
@@ -583,11 +720,9 @@ module.exports = (client) => {
     ══════════════════════════════════════ */
     else if (command === "resume") {
       const queue = queues.get(guildId);
-      if (!queue)
-        return message.reply("❌ Nenhuma música na fila.");
-
-      const resumed = queue.player.unpause();
-      message.reply(resumed ? "▶️ Música continuando!" : "❌ Não foi possível retomar.");
+      if (!queue) return message.reply("❌ Nenhuma música na fila.");
+      const ok = queue.player.unpause();
+      message.reply(ok ? "▶️ Continuando!" : "❌ Não foi possível retomar.");
     }
 
     /* ══════════════════════════════════════
