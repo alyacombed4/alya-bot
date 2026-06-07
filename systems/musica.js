@@ -388,13 +388,11 @@ function extractYouTubeId(url) {
 }
 
 /**
- * Cria um AudioResource usando a InnerTube API do youtubei.js.
+ * Cria um AudioResource via youtubei.js usando o cliente YTMUSIC.
  *
- * Por que não usar yt.download() diretamente?
- *   Alguns formatos retornados pelo InnerTube são marcados como
- *   "login required" quando o cliente padrão é o WEB. Usar o
- *   cliente ANDROID ou IOS contorna isso porque o YouTube serve
- *   URLs de stream diretas nesses clientes sem exigir autenticação.
+ * O cliente YTMUSIC (YouTube Music) retorna URLs de stream diretas
+ * sem cifragem JS, evitando os erros "No valid URL to decipher"
+ * e "login required" que ocorrem com os clientes WEB e ANDROID.
  *
  * @param {string} url
  * @returns {Promise<import("@discordjs/voice").AudioResource>}
@@ -403,43 +401,20 @@ async function createYouTubeResource(url) {
   const videoId = extractYouTubeId(url);
   if (!videoId) throw new Error(`URL inválida: ${url}`);
 
-  // Cria instância com cliente ANDROID — retorna URLs de stream sem login
-  const yt = await Innertube.create({
-    client_type: "ANDROID",          // contorna "login required"
-    generate_session_locally: true,
-    retrieve_player: true,
-  });
+  const yt = await getInnertube();
 
-  const info = await yt.getBasicInfo(videoId, "ANDROID");
-
-  // Pega o melhor formato de áudio disponível (sem vídeo)
-  const format = info.chooseFormat({
+  // YTMUSIC retorna URLs diretas sem necessidade de decipher()
+  const webStream = await yt.download(videoId, {
     type: "audio",
     quality: "best",
+    client: "YTMUSIC",
   });
 
-  if (!format) throw new Error("Nenhum formato de áudio disponível.");
+  const nodeStream = Readable.fromWeb(webStream);
 
-  // Decodifica a URL do stream (o InnerTube pode retornar URLs cifradas)
-  const streamUrl = format.decipher(yt.session.player);
-
-  // Faz fetch com headers adequados para não ser bloqueado
-  const response = await fetch(streamUrl, {
-    headers: {
-      "User-Agent":
-        "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
-      "Accept-Language": "en-US,en;q=0.9",
-      Range: "bytes=0-",
-    },
-    signal: AbortSignal.timeout(15_000),
+  nodeStream.on("error", (err) => {
+    console.error("[Music] Erro no nodeStream:", err.message);
   });
-
-  if (!response.ok) {
-    throw new Error(`Fetch do stream falhou: HTTP ${response.status}`);
-  }
-
-  // Converte Web ReadableStream → Node.js Readable
-  const nodeStream = Readable.fromWeb(response.body);
 
   return createAudioResource(nodeStream, {
     inputType: StreamType.Arbitrary,
