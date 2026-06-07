@@ -9,11 +9,9 @@ const {
 } = require("@discordjs/voice");
 const playdl = require("play-dl");
 
-/* =========================
-   MUSIC SYSTEM
-========================= */
-
+/* ========================= MUSIC SYSTEM ========================= */
 const TARGET_CHANNEL = "1476321416470335659";
+const ROLE_TO_DELETE = "1484705404385628334";
 const queues = new Map();
 
 async function getVideoInfo(query) {
@@ -24,7 +22,11 @@ async function getVideoInfo(query) {
       const searchQuery = `${spotifyData.name} ${spotifyData.artists[0].name}`;
       const results = await playdl.search(searchQuery, { limit: 1 });
       if (!results || results.length === 0) return null;
-      return { url: results[0].url, title: results[0].title, duration: results[0].durationInSec };
+      return {
+        url: results[0].url,
+        title: results[0].title,
+        duration: results[0].durationInSec,
+      };
     } catch (err) {
       console.error("Erro ao converter Spotify:", err);
       return null;
@@ -58,7 +60,12 @@ async function getVideoInfo(query) {
 
 function getQueue(guildId) {
   if (!queues.has(guildId)) {
-    queues.set(guildId, { songs: [], player: null, connection: null, playing: false });
+    queues.set(guildId, {
+      songs: [],
+      player: null,
+      connection: null,
+      playing: false,
+    });
   }
   return queues.get(guildId);
 }
@@ -66,7 +73,6 @@ function getQueue(guildId) {
 function reconectarAFK(guild) {
   const afkChannel = guild.channels.cache.get(TARGET_CHANNEL);
   if (!afkChannel) return;
-
   joinVoiceChannel({
     channelId: afkChannel.id,
     guildId: guild.id,
@@ -74,14 +80,12 @@ function reconectarAFK(guild) {
     selfDeaf: true,
     selfMute: true,
   });
-
   console.log("✅ Bot reconectado no canal AFK.");
 }
 
 async function playSong(message, queue) {
   if (queue.songs.length === 0) {
     queue.playing = false;
-
     // Sai da call de música e volta pro AFK depois de 30s sem música
     setTimeout(() => {
       if (queue.songs.length === 0 && queue.connection) {
@@ -98,13 +102,16 @@ async function playSong(message, queue) {
 
   try {
     const stream = await playdl.stream(song.url, { quality: 2 });
-    const resource = createAudioResource(stream.stream, { inputType: stream.type });
-
+    const resource = createAudioResource(stream.stream, {
+      inputType: stream.type,
+    });
     queue.player.play(resource);
 
     const durMin = Math.floor(song.duration / 60);
     const durSec = String(song.duration % 60).padStart(2, "0");
-    message.channel.send(`🎵 Tocando agora: **${song.title}** (${durMin}:${durSec})\n🔗 ${song.url}`);
+    message.channel.send(
+      `🎵 Tocando agora: **${song.title}** (${durMin}:${durSec})\n🔗 ${song.url}`
+    );
 
     queue.player.once(AudioPlayerStatus.Idle, () => {
       queue.songs.shift();
@@ -116,7 +123,6 @@ async function playSong(message, queue) {
       queue.songs.shift();
       playSong(message, queue);
     });
-
   } catch (err) {
     console.error("Erro ao tocar:", err);
     message.channel.send("❌ Erro ao tocar essa música, pulando...");
@@ -126,7 +132,6 @@ async function playSong(message, queue) {
 }
 
 module.exports = (client) => {
-
   client.on("messageCreate", async (message) => {
     if (!message.guild) return;
     if (message.author.bot) return;
@@ -143,7 +148,9 @@ module.exports = (client) => {
 
       const query = args.join(" ");
       if (!query)
-        return message.reply("❌ Informe o nome, link do YouTube ou Spotify.\nEx: `!p lofi hip hop`");
+        return message.reply(
+          "❌ Informe o nome, link do YouTube ou Spotify.\nEx: !p lofi hip hop"
+        );
 
       const searching = await message.reply("🔍 Pesquisando...");
 
@@ -169,24 +176,35 @@ module.exports = (client) => {
             channelId: voiceChannel.id,
             guildId: message.guild.id,
             adapterCreator: message.guild.voiceAdapterCreator,
-            selfDeaf: false, // 👈 sem selfDeaf pra conseguir tocar
+            selfDeaf: false,
             selfMute: false,
           });
 
           queue.player = createAudioPlayer();
           queue.connection.subscribe(queue.player);
 
-          queue.connection.on(VoiceConnectionStatus.Disconnected, async () => {
-            try {
-              await Promise.race([
-                entersState(queue.connection, VoiceConnectionStatus.Signalling, 5_000),
-                entersState(queue.connection, VoiceConnectionStatus.Connecting, 5_000),
-              ]);
-            } catch {
-              queue.connection.destroy();
-              queues.delete(message.guild.id);
+          queue.connection.on(
+            VoiceConnectionStatus.Disconnected,
+            async () => {
+              try {
+                await Promise.race([
+                  entersState(
+                    queue.connection,
+                    VoiceConnectionStatus.Signalling,
+                    5_000
+                  ),
+                  entersState(
+                    queue.connection,
+                    VoiceConnectionStatus.Connecting,
+                    5_000
+                  ),
+                ]);
+              } catch {
+                queue.connection.destroy();
+                queues.delete(message.guild.id);
+              }
             }
-          });
+          );
         }
 
         queue.songs.push(song);
@@ -202,7 +220,6 @@ module.exports = (client) => {
           await searching.edit("✅ Música encontrada! Iniciando...");
           playSong(message, queue);
         }
-
       } catch (err) {
         console.error(err);
         searching.edit("❌ Erro ao tocar a música. Tente novamente.");
@@ -214,7 +231,6 @@ module.exports = (client) => {
       const queue = queues.get(message.guild.id);
       if (!queue || !queue.playing)
         return message.reply("❌ Nenhuma música tocando.");
-
       queue.player.stop();
       message.reply("⏭️ Música pulada!");
     }
@@ -224,13 +240,11 @@ module.exports = (client) => {
       const queue = queues.get(message.guild.id);
       if (!queue || !queue.connection)
         return message.reply("❌ O bot não está em nenhuma call.");
-
       queue.songs = [];
       queue.player?.stop();
       queue.connection.destroy();
       queues.delete(message.guild.id);
       message.reply("⏹️ Música parada e fila limpa!");
-
       // Volta pro canal AFK após parar
       reconectarAFK(message.guild);
     }
@@ -257,17 +271,14 @@ module.exports = (client) => {
       const queue = queues.get(message.guild.id);
       if (!queue || !queue.playing)
         return message.reply("❌ Nenhuma música tocando.");
-
       queue.player.pause();
-      message.reply("⏸️ Música pausada. Use `!resume` para continuar.");
+      message.reply("⏸️ Música pausada. Use !resume para continuar.");
     }
 
     // ========== !resume - CONTINUAR ==========
     if (command === "!resume") {
       const queue = queues.get(message.guild.id);
-      if (!queue)
-        return message.reply("❌ Nenhuma música na fila.");
-
+      if (!queue) return message.reply("❌ Nenhuma música na fila.");
       queue.player.unpause();
       message.reply("▶️ Música continuando!");
     }
@@ -277,15 +288,33 @@ module.exports = (client) => {
       const queue = queues.get(message.guild.id);
       if (!queue || !queue.playing || queue.songs.length === 0)
         return message.reply("❌ Nenhuma música tocando.");
-
       const song = queue.songs[0];
       const durMin = Math.floor(song.duration / 60);
       const durSec = String(song.duration % 60).padStart(2, "0");
-
       message.reply(
         `🎵 **Tocando agora:**\n**${song.title}**\n⏱️ Duração: ${durMin}:${durSec}\n👤 Pedido por: ${song.requestedBy}\n🔗 ${song.url}`
       );
     }
 
+    // ========== !delcargo - APAGAR CARGO ==========
+    if (command === "!delcargo") {
+      // Verifica se quem usou o comando é administrador
+      if (!message.member.permissions.has("Administrator")) {
+        return message.reply("❌ Você não tem permissão para usar este comando.");
+      }
+
+      const role = message.guild.roles.cache.get(ROLE_TO_DELETE);
+      if (!role) {
+        return message.reply("❌ Cargo não encontrado no servidor.");
+      }
+
+      try {
+        await role.delete("Cargo deletado via comando !delcargo");
+        message.reply(`✅ Cargo **${role.name}** deletado com sucesso!`);
+      } catch (err) {
+        console.error("Erro ao deletar cargo:", err);
+        message.reply("❌ Não foi possível deletar o cargo. Verifique se o bot tem permissão.");
+      }
+    }
   });
 };
