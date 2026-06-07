@@ -12,14 +12,7 @@ const {
 } = require("@discordjs/voice");
 
 const { Innertube } = require("youtubei.js");
-
-const { execFile } = require("child_process");
-const { promisify } = require("util");
-const fs = require("fs");
-const path = require("path");
-const crypto = require("crypto");
-
-const execFileAsync = promisify(execFile);
+const ytdl = require("@distube/ytdl-core");
 
 const AFK_CHANNEL_ID  = "1476321416470335659";
 const IDLE_TIMEOUT_MS = 30_000;
@@ -283,42 +276,17 @@ function extractYouTubeId(url) {
 }
 
 async function createYouTubeResource(url) {
-  const videoId = extractYouTubeId(url);
-  if (!videoId) throw new Error(`URL inválida: ${url}`);
-
-  const tmpFile = path.join("/tmp", `music_${crypto.randomBytes(6).toString("hex")}`);
-
-  await execFileAsync("yt-dlp", [
-    "-x",
-    "--audio-format", "opus",
-    "--audio-quality", "0",
-    "--no-playlist",
-    "--no-warnings",
-    "-o", tmpFile,
-    url,
-  ], {
-    timeout: 60_000,
+  const stream = ytdl(url, {
+    filter: "audioonly",
+    quality: "highestaudio",
+    highWaterMark: 1 << 25,
   });
 
-  const finalFile = `${tmpFile}.opus`;
-
-  if (!fs.existsSync(finalFile)) {
-    throw new Error(`Arquivo de áudio não encontrado após download: ${finalFile}`);
-  }
-
-  const resource = createAudioResource(finalFile, {
-    inputType: StreamType.OggOpus,
+  const resource = createAudioResource(stream, {
+    inputType: StreamType.Arbitrary,
   });
 
-  const cleanup = () => {
-    fs.unlink(finalFile, (err) => {
-      if (err && err.code !== "ENOENT") {
-        console.error("[Music] Erro ao deletar arquivo temporário:", err.message);
-      } else {
-        console.log(`[Music] 🗑️ Deletado: ${path.basename(finalFile)}`);
-      }
-    });
-  };
+  const cleanup = () => {};
 
   return { resource, cleanup };
 }
