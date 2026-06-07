@@ -22,21 +22,23 @@ function loadYoutubeCookies() {
     console.warn("[Music] ⚠️  YOUTUBE_COOKIES não definido no .env — pode ocorrer erro 429.");
     return null;
   }
-  const cookieStr = raw
+  // Novo formato: array de objetos { name, value } esperado pelo @distube/ytdl-core
+  const cookies = raw
     .split("\n")
     .filter(l => l.trim() && !l.startsWith("#"))
     .map(l => {
       const p = l.split("\t");
       if (p.length < 7) return null;
-      return `${p[5].trim()}=${p[6].trim()}`;
+      return { name: p[5].trim(), value: p[6].trim() };
     })
-    .filter(Boolean)
-    .join("; ");
-  console.log("[Music] 🍪 Cookies do YouTube carregados.");
-  return cookieStr;
+    .filter(Boolean);
+  if (cookies.length === 0) return null;
+  console.log(`[Music] 🍪 ${cookies.length} cookies do YouTube carregados.`);
+  return cookies;
 }
 
 const _youtubeCookies = loadYoutubeCookies();
+const _ytdlAgent = _youtubeCookies ? ytdl.createAgent(_youtubeCookies) : null;
 
 const AFK_CHANNEL_ID  = "1476321416470335659";
 const IDLE_TIMEOUT_MS = 30_000;
@@ -302,14 +304,9 @@ function extractYouTubeId(url) {
 async function createYouTubeResource(url) {
   const options = {
     filter: "audioonly",
-    quality: "highestaudio",
+    quality: "bestaudio",
     highWaterMark: 1 << 25,
-    requestOptions: {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        ..._youtubeCookies ? { Cookie: _youtubeCookies } : {},
-      },
-    },
+    ...(_ytdlAgent ? { agent: _ytdlAgent } : {}),
   };
 
   const stream = ytdl(url, options);
