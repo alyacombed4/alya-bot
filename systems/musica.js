@@ -283,7 +283,7 @@ async function createYouTubeResource(url) {
   });
 
   const resource = createAudioResource(stream, {
-    inputType: StreamType.Arbitrary,
+    inputType: StreamType.WebmOpus,
   });
 
   const cleanup = () => {};
@@ -382,7 +382,8 @@ async function playSong(channel, guild) {
     });
 
     queue.player.once("error", (err) => {
-      console.error("[Music] Erro no player:", err.message);
+      console.error("[Music] Erro no player completo:");
+      console.error(err);
       cleanup();
       if (!queue.destroyed) {
         queue.songs.shift();
@@ -392,7 +393,8 @@ async function playSong(channel, guild) {
     });
 
   } catch (err) {
-    console.error("[Music] Erro ao criar stream:", err.message);
+    console.error("[Music] Erro ao criar stream completo:");
+    console.error(err);
     channel.send("❌ Não foi possível tocar essa música, pulando...").catch(() => {});
     queue.songs.shift();
     setTimeout(() => playSong(channel, guild), 1_000);
