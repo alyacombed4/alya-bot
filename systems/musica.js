@@ -286,7 +286,7 @@ async function createYouTubeResource(url) {
   const webStream = await yt.download(videoId, {
     type: "audio",
     quality: "best",
-    client: "TVANONYMOUS",
+    client: "TV",
   });
 
   const nodeStream = Readable.fromWeb(webStream);
