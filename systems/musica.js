@@ -13,6 +13,30 @@ const {
 
 const { Innertube } = require("youtubei.js");
 const ytdl = require("@distube/ytdl-core");
+// Carrega cookies do YouTube para evitar erro 429
+// Lê da variável de ambiente YOUTUBE_COOKIES (formato Netscape/tab-separado)
+// Nunca coloque cookies diretamente no código ou no repositório!
+function loadYoutubeCookies() {
+  const raw = process.env.YOUTUBE_COOKIES;
+  if (!raw) {
+    console.warn("[Music] ⚠️  YOUTUBE_COOKIES não definido no .env — pode ocorrer erro 429.");
+    return null;
+  }
+  const cookieStr = raw
+    .split("\n")
+    .filter(l => l.trim() && !l.startsWith("#"))
+    .map(l => {
+      const p = l.split("\t");
+      if (p.length < 7) return null;
+      return `${p[5].trim()}=${p[6].trim()}`;
+    })
+    .filter(Boolean)
+    .join("; ");
+  console.log("[Music] 🍪 Cookies do YouTube carregados.");
+  return cookieStr;
+}
+
+const _youtubeCookies = loadYoutubeCookies();
 
 const AFK_CHANNEL_ID  = "1476321416470335659";
 const IDLE_TIMEOUT_MS = 30_000;
@@ -276,11 +300,19 @@ function extractYouTubeId(url) {
 }
 
 async function createYouTubeResource(url) {
-  const stream = ytdl(url, {
+  const options = {
     filter: "audioonly",
     quality: "highestaudio",
     highWaterMark: 1 << 25,
-  });
+    requestOptions: {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        ..._youtubeCookies ? { Cookie: _youtubeCookies } : {},
+      },
+    },
+  };
+
+  const stream = ytdl(url, options);
 
   const resource = createAudioResource(stream, {
     inputType: StreamType.WebmOpus,
