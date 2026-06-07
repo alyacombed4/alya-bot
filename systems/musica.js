@@ -12,33 +12,7 @@ const {
 } = require("@discordjs/voice");
 
 const { Innertube } = require("youtubei.js");
-const ytdl = require("@distube/ytdl-core");
-// Carrega cookies do YouTube para evitar erro 429
-// Lê da variável de ambiente YOUTUBE_COOKIES (formato Netscape/tab-separado)
-// Nunca coloque cookies diretamente no código ou no repositório!
-function loadYoutubeCookies() {
-  const raw = process.env.YOUTUBE_COOKIES;
-  if (!raw) {
-    console.warn("[Music] ⚠️  YOUTUBE_COOKIES não definido no .env — pode ocorrer erro 429.");
-    return null;
-  }
-  // Novo formato: array de objetos { name, value } esperado pelo @distube/ytdl-core
-  const cookies = raw
-    .split("\n")
-    .filter(l => l.trim() && !l.startsWith("#"))
-    .map(l => {
-      const p = l.split("\t");
-      if (p.length < 7) return null;
-      return { name: p[5].trim(), value: p[6].trim() };
-    })
-    .filter(Boolean);
-  if (cookies.length === 0) return null;
-  console.log(`[Music] 🍪 ${cookies.length} cookies do YouTube carregados.`);
-  return cookies;
-}
-
-const _youtubeCookies = loadYoutubeCookies();
-const _ytdlAgent = _youtubeCookies ? ytdl.createAgent(_youtubeCookies) : null;
+const { Readable } = require("stream");
 
 const AFK_CHANNEL_ID  = "1476321416470335659";
 const IDLE_TIMEOUT_MS = 30_000;
@@ -302,17 +276,24 @@ function extractYouTubeId(url) {
 }
 
 async function createYouTubeResource(url) {
-  const options = {
-    filter: "audioonly",
-    quality: "bestaudio",
-    highWaterMark: 1 << 25,
-    ...(_ytdlAgent ? { agent: _ytdlAgent } : {}),
-  };
+  const videoId = extractYouTubeId(url);
+  if (!videoId) throw new Error(`URL inválida: ${url}`);
 
-  const stream = ytdl(url, options);
+  const yt = await getInnertube();
 
-  const resource = createAudioResource(stream, {
-    inputType: StreamType.WebmOpus,
+  // TVANONYMOUS: cliente de TV que retorna URLs diretas sem decipher JS
+  // Não precisa de login nem cookies, funciona em qualquer servidor
+  const webStream = await yt.download(videoId, {
+    type: "audio",
+    quality: "best",
+    client: "TVANONYMOUS",
+  });
+
+  const nodeStream = Readable.fromWeb(webStream);
+  nodeStream.on("error", (err) => console.error("[Music] Stream error:", err.message));
+
+  const resource = createAudioResource(nodeStream, {
+    inputType: StreamType.Arbitrary,
   });
 
   const cleanup = () => {};
