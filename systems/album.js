@@ -9,7 +9,6 @@ const fs   = require('fs');
 const path = require('path');
 
 // ─── CONFIGURAÇÕES ─────────────────────────────────────────────────────────────
-const ALLOWED_CHANNEL = process.env.ALLOWED_CHANNEL_ID || '1487213672362278942';
 const PRECO_PACOTE    = parseInt(process.env.ECONOMIA_PRECO_PACOTE || '500');
 const DATA_FILE       = path.join(__dirname, 'data.json'); // systems/data.json
 
@@ -312,13 +311,6 @@ function executarTroca(trocaId) {
 }
 
 // ─── HELPERS DISCORD ─────────────────────────────────────────────────────────
-function checkCanal(message) {
-  if (message.channel.id !== ALLOWED_CHANNEL) {
-    message.reply(`❌ Este comando só funciona em <#${ALLOWED_CHANNEL}>!`);
-    return false;
-  }
-  return true;
-}
 
 function embed(titulo, desc, cor = '#e53935') {
   return new EmbedBuilder()
@@ -357,7 +349,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'abrirpacote': {
-        if (!checkCanal(message)) return;
+        
         const userId = message.author.id;
         ensureUser(userId);
 
@@ -414,7 +406,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'figurinha': {
-        if (!checkCanal(message)) return;
+        
         const id = parseInt(args[0]);
         if (isNaN(id) || id < 1 || id > 980) {
           return message.reply({ embeds: [embed('❌ ID inválido', 'Use: `!figurinha <id>`\nEx: `!figurinha 42` (IDs: 1–980)')] });
@@ -453,7 +445,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'colecao': {
-        if (!checkCanal(message)) return;
+        
         const userId = message.author.id;
         ensureUser(userId);
 
@@ -501,7 +493,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'album': {
-        if (!checkCanal(message)) return;
+        
         const userId = message.author.id;
         ensureUser(userId);
 
@@ -548,7 +540,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'trocar': {
-        if (!checkCanal(message)) return;
+        
         const receptor = message.mentions.users.first();
         if (!receptor) return message.reply({ embeds: [embed('❌', 'Uso: `!trocar @usuario <id_sua> <id_quer>`')] });
         if (receptor.id === message.author.id) return message.reply({ embeds: [embed('❌', 'Você não pode trocar consigo mesmo!')] });
@@ -584,7 +576,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'aceitartroca': {
-        if (!checkCanal(message)) return;
+        
         const trocaId = parseInt(args[0]);
         if (isNaN(trocaId)) return message.reply({ embeds: [embed('❌', 'ID inválido.')] });
 
@@ -611,7 +603,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'recusartroca': {
-        if (!checkCanal(message)) return;
+        
         const trocaId = parseInt(args[0]);
         if (isNaN(trocaId)) return message.reply({ embeds: [embed('❌', 'ID inválido.')] });
 
@@ -628,7 +620,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'darfigurinha': {
-        if (!checkCanal(message)) return;
+        
         const receptor = message.mentions.users.first();
         if (!receptor)                          return message.reply({ embeds: [embed('❌', 'Uso: `!darfigurinha @usuario <id>`')] });
         if (receptor.id === message.author.id)  return message.reply({ embeds: [embed('❌', 'Você não pode dar para si mesmo!')] });
@@ -652,7 +644,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'venderfigurinha': {
-        if (!checkCanal(message)) return;
+        
         const id  = parseInt(args[0]);
         const qtd = parseInt(args[1]) || 1;
         if (isNaN(id)) return message.reply({ embeds: [embed('❌', 'Uso: `!venderfigurinha <id> [quantidade]`')] });
@@ -677,7 +669,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'comprarpacote': {
-        if (!checkCanal(message)) return;
+        
         const qtd   = Math.min(parseInt(args[0]) || 1, 10);
         const total = PRECO_PACOTE * qtd;
         const userId = message.author.id;
@@ -702,7 +694,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'rankingalbum': {
-        if (!checkCanal(message)) return;
+        
         const ranking = getRanking();
         if (ranking.length === 0) return message.reply({ embeds: [embed('🏆 Ranking', 'Ninguém tem figurinhas ainda!')] });
 
@@ -735,7 +727,7 @@ module.exports = (client) => {
 
       // ─────────────────────────────────────────────────────────────────────
       case 'datac': {
-        if (!checkCanal(message)) return;
+        
         if (!isAdmin(message)) return message.reply({ embeds: [embed('❌ Sem Permissão', 'Somente administradores podem baixar o banco de dados!')] });
 
         try {
@@ -768,7 +760,7 @@ module.exports = (client) => {
       // ─────────────────────────────────────────────────────────────────────
       case 'ajuda':
       case 'helpalbum': {
-        if (!checkCanal(message)) return;
+        
 
         const e = new EmbedBuilder()
           .setTitle('⚽ Álbum da Copa 2022 — Comandos')
