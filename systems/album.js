@@ -1,13 +1,321 @@
 // src/commands/index.js
-// Todos os comandos do bot
+// Sistema completo de figurinhas — dados salvos em system/data.json
+
+'use strict';
 
 const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
-const { db, queries, addFigurinhaToUser, getPacotesUser, addPacotesUser, getPercentualAlbum, executarTroca, ensureUser } = require('../../database/db');
-const { abrirPacote } = require('../utils/pacotes');
-const { gerarImagemPacote, gerarImagemFigurinha, gerarPaginaAlbum, RARIDADE_CONFIG } = require('../canvas/gerarFigurinha');
+const fs   = require('fs');
+const path = require('path');
 
-const ALLOWED_CHANNEL = process.env.ALLOWED_CHANNEL_ID || '1487213672362278942';
-const PRECO_PACOTE = parseInt(process.env.ECONOMIA_PRECO_PACOTE || '500');
+// ─── CONFIGURAÇÕES ────────────────────────────────────────────────────────────
+const ALLOWED_CHANNEL  = process.env.ALLOWED_CHANNEL_ID  || '1487213672362278942';
+const PRECO_PACOTE     = parseInt(process.env.ECONOMIA_PRECO_PACOTE || '500');
+const DATA_FILE        = path.join(__dirname, 'data.json');   // system/data.json
+
+// ─── RARIDADE CONFIG (inline — sem dependência externa) ───────────────────────
+const RARIDADE_CONFIG = {
+  comum:    { label: 'Comum',    chance: 55, cor: '#9e9e9e' },
+  rara:     { label: 'Rara',     chance: 28, cor: '#2196f3' },
+  epica:    { label: 'Épica',    chance: 12, cor: '#9c27b0' },
+  lendaria: { label: 'Lendária', chance:  4, cor: '#ff9800' },
+  cromada:  { label: 'Cromada',  chance:  1, cor: '#ffd700' },
+};
+
+const RARIDADE_EMOJI = {
+  comum: '⚪', rara: '🔵', epica: '🟣', lendaria: '🟠', cromada: '⭐',
+};
+
+const PRECO_RARIDADE = {
+  comum: 50, rara: 150, epica: 400, lendaria: 1000, cromada: 3000,
+};
+
+// ─── BANCO DE DADOS JSON ──────────────────────────────────────────────────────
+// Estrutura do data.json:
+// {
+//   "users": {
+//     "<userId>": {
+//       "colecao":   { "<figId>": <quantidade> },
+//       "pacotes":   { "quantidade": N, "total_abertos": N },
+//       "stats":     { "trocas_realizadas": N, "total_figurinhas": N },
+//       "moedas":    N
+//     }
+//   },
+//   "trocas": {
+//     "<trocaId>": { id, solicitante_id, receptor_id, figurinha_oferta_id, figurinha_pedido_id, status, criado_em }
+//   },
+//   "next_troca_id": 1,
+//   "figurinhas": { "<id>": { id, nome, pais, posicao, overall, raridade, grupo, tipo, cor_primaria } }
+// }
+
+let _db = null;
+
+function loadDB() {
+  if (_db) return _db;
+  if (fs.existsSync(DATA_FILE)) {
+    try { _db = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
+    catch { _db = {}; }
+  } else {
+    _db = {};
+  }
+  if (!_db.users)         _db.users         = {};
+  if (!_db.trocas)        _db.trocas        = {};
+  if (!_db.next_troca_id) _db.next_troca_id = 1;
+  if (!_db.figurinhas)    _db.figurinhas    = buildFigurinhas();
+  return _db;
+}
+
+function saveDB() {
+  const dir = path.dirname(DATA_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(DATA_FILE, JSON.stringify(_db, null, 2), 'utf8');
+}
+
+// ─── GERADOR DE FIGURINHAS (980 cards) ───────────────────────────────────────
+function buildFigurinhas() {
+  const PAISES = [
+    'Brasil','Argentina','França','Alemanha','Espanha','Portugal','Inglaterra',
+    'Itália','Holanda','Bélgica','Croácia','Uruguai','México','EUA','Japão',
+    'Coreia do Sul','Austrália','Senegal','Marrocos','Gana','Camarões','Tunísia',
+    'Equador','Qatar','Polônia','Dinamarca','Suíça','Sérvia','Gales','Irã',
+    'Costa Rica','Arábia Saudita',
+  ];
+  const POSICOES = ['GOL','ZAG','LAD','LAE','VOL','MEC','MEI','ATA','PNT'];
+  const GRUPOS   = ['A','B','C','D','E','F','G','H'];
+  const NOMES = [
+    'Neymar','Messi','Mbappé','Benzema','Cristiano Ronaldo','Modric','De Bruyne',
+    'Salah','Lewandowski','Kane','Vinicius Jr','Raphinha','Richarlison','Alisson',
+    'Marquinhos','Thiago Silva','Casemiro','Fred','Fabinho','Antony','Gabriel Jesus',
+    'Pedri','Gavi','Busquets','Alba','Jordi Alba','Ter Stegen','Kimmich','Müller',
+    'Gnabry','Werner','Havertz','Rüdiger','Neuer','Goretzka','Musiala',
+  ];
+
+  const out = {};
+  const raridades = Object.keys(RARIDADE_CONFIG);
+  const chances   = raridades.map(r => RARIDADE_CONFIG[r].chance);
+  const totalCh   = chances.reduce((a, b) => a + b, 0);
+
+  const pickRaridade = () => {
+    let r = Math.random() * totalCh;
+    for (let i = 0; i < raridades.length; i++) {
+      r -= chances[i];
+      if (r <= 0) return raridades[i];
+    }
+    return 'comum';
+  };
+
+  for (let id = 1; id <= 980; id++) {
+    const raridade = pickRaridade();
+    const nome = NOMES[Math.floor(Math.random() * NOMES.length)] + (id > NOMES.length ? ` #${id}` : '');
+    out[id] = {
+      id,
+      nome,
+      pais:        PAISES[id % PAISES.length],
+      posicao:     POSICOES[id % POSICOES.length],
+      overall:     raridade === 'cromada' ? 95 + Math.floor(Math.random() * 5)
+                 : raridade === 'lendaria'? 88 + Math.floor(Math.random() * 7)
+                 : raridade === 'epica'   ? 80 + Math.floor(Math.random() * 8)
+                 : raridade === 'rara'    ? 70 + Math.floor(Math.random() * 10)
+                 :                         55 + Math.floor(Math.random() * 15),
+      raridade,
+      grupo:       GRUPOS[id % GRUPOS.length],
+      tipo:        id % 15 === 0 ? 'escudo' : id % 20 === 0 ? 'estadio' : 'jogador',
+      cor_primaria: RARIDADE_CONFIG[raridade].cor,
+    };
+  }
+  return out;
+}
+
+// ─── HELPERS DO DB ────────────────────────────────────────────────────────────
+function ensureUser(userId) {
+  const db = loadDB();
+  if (!db.users[userId]) {
+    db.users[userId] = {
+      colecao: {},
+      pacotes: { quantidade: 0, total_abertos: 0 },
+      stats:   { trocas_realizadas: 0, total_figurinhas: 0 },
+      moedas:  0,
+    };
+    saveDB();
+  }
+  return db.users[userId];
+}
+
+function getFigurinha(id) {
+  return loadDB().figurinhas[id] || null;
+}
+
+function getAllFigurinhas() {
+  return Object.values(loadDB().figurinhas);
+}
+
+function getUserFigurinha(userId, figId) {
+  const u = ensureUser(userId);
+  const qtd = u.colecao[figId] || 0;
+  return qtd > 0 ? { figurinha_id: figId, quantidade: qtd, raridade: getFigurinha(figId)?.raridade } : null;
+}
+
+function getColecaoUser(userId) {
+  const u = ensureUser(userId);
+  return Object.entries(u.colecao)
+    .filter(([, q]) => q > 0)
+    .map(([id, quantidade]) => {
+      const fig = getFigurinha(parseInt(id));
+      return { figurinha_id: parseInt(id), quantidade, raridade: fig?.raridade };
+    });
+}
+
+function addFigurinhaToUser(userId, figId) {
+  const db = loadDB();
+  const u  = ensureUser(userId);
+  u.colecao[figId] = (u.colecao[figId] || 0) + 1;
+  u.stats.total_figurinhas = (u.stats.total_figurinhas || 0) + 1;
+  db.users[userId] = u;
+  saveDB();
+}
+
+function removeFigurinhaUser(userId, figId) {
+  const db = loadDB();
+  const u  = ensureUser(userId);
+  if ((u.colecao[figId] || 0) > 0) u.colecao[figId]--;
+  if (u.colecao[figId] <= 0) delete u.colecao[figId];
+  db.users[userId] = u;
+  saveDB();
+}
+
+function getPacotesUser(userId) {
+  return ensureUser(userId).pacotes;
+}
+
+function addPacotesUser(userId, qtd) {
+  const db = loadDB();
+  const u  = ensureUser(userId);
+  u.pacotes.quantidade = (u.pacotes.quantidade || 0) + qtd;
+  db.users[userId] = u;
+  saveDB();
+}
+
+function getPercentualAlbum(userId) {
+  const col   = getColecaoUser(userId);
+  const unicas = col.length;
+  const total  = Object.keys(loadDB().figurinhas).length;
+  return { unicas, total, percentual: total ? ((unicas / total) * 100).toFixed(1) : '0.0' };
+}
+
+function getRanking() {
+  const db = loadDB();
+  return Object.entries(db.users)
+    .map(([userId, u]) => {
+      const col = Object.entries(u.colecao).filter(([, q]) => q > 0);
+      return {
+        user_id: userId,
+        figurinhas_unicas: col.length,
+        cromadas:  col.filter(([id]) => db.figurinhas[id]?.raridade === 'cromada').length,
+        lendarias: col.filter(([id]) => db.figurinhas[id]?.raridade === 'lendaria').length,
+      };
+    })
+    .filter(r => r.figurinhas_unicas > 0)
+    .sort((a, b) => b.figurinhas_unicas - a.figurinhas_unicas)
+    .slice(0, 10);
+}
+
+// ─── ABRIR PACOTE (7 figurinhas aleatórias) ───────────────────────────────────
+function abrirPacote(userId) {
+  const db = loadDB();
+  const u  = ensureUser(userId);
+  if (u.pacotes.quantidade <= 0) return null;
+
+  u.pacotes.quantidade--;
+  u.pacotes.total_abertos = (u.pacotes.total_abertos || 0) + 1;
+
+  const ids = Object.keys(db.figurinhas);
+  const figurinhas = [];
+
+  // Garantir ao menos 1 rara ou melhor
+  const raras = ids.filter(id => ['rara','epica','lendaria','cromada'].includes(db.figurinhas[id].raridade));
+
+  for (let i = 0; i < 7; i++) {
+    let id;
+    if (i === 0 && raras.length) {
+      id = parseInt(raras[Math.floor(Math.random() * raras.length)]);
+    } else {
+      // Sorteio ponderado por raridade
+      const totalCh = Object.values(RARIDADE_CONFIG).reduce((a, r) => a + r.chance, 0);
+      let roll = Math.random() * totalCh;
+      let raridade = 'comum';
+      for (const [r, cfg] of Object.entries(RARIDADE_CONFIG)) {
+        roll -= cfg.chance;
+        if (roll <= 0) { raridade = r; break; }
+      }
+      const pool = ids.filter(x => db.figurinhas[x].raridade === raridade);
+      id = parseInt(pool.length ? pool[Math.floor(Math.random() * pool.length)] : ids[Math.floor(Math.random() * ids.length)]);
+    }
+    addFigurinhaToUser(userId, id);
+    figurinhas.push(db.figurinhas[id]);
+  }
+
+  db.users[userId] = u;
+  saveDB();
+  return figurinhas;
+}
+
+// ─── TROCAS ───────────────────────────────────────────────────────────────────
+function criarTroca(solicitanteId, receptorId, figOfertaId, figPedidoId) {
+  const db = loadDB();
+  const id = db.next_troca_id++;
+  db.trocas[id] = {
+    id, solicitante_id: solicitanteId, receptor_id: receptorId,
+    figurinha_oferta_id: figOfertaId, figurinha_pedido_id: figPedidoId,
+    status: 'pendente', criado_em: new Date().toISOString(),
+  };
+  saveDB();
+  return id;
+}
+
+function getTroca(id) {
+  return loadDB().trocas[id] || null;
+}
+
+function atualizarTroca(id, status) {
+  const db = loadDB();
+  if (db.trocas[id]) { db.trocas[id].status = status; saveDB(); }
+}
+
+function executarTroca(trocaId) {
+  const db    = loadDB();
+  const troca = db.trocas[trocaId];
+  if (!troca || troca.status !== 'pendente') return false;
+
+  const colOferta = getUserFigurinha(troca.solicitante_id, troca.figurinha_oferta_id);
+  const colPedido = getUserFigurinha(troca.receptor_id,    troca.figurinha_pedido_id);
+  if (!colOferta || colOferta.quantidade < 1) return false;
+  if (!colPedido || colPedido.quantidade < 1) return false;
+
+  removeFigurinhaUser(troca.solicitante_id, troca.figurinha_oferta_id);
+  addFigurinhaToUser(troca.receptor_id,    troca.figurinha_oferta_id);
+  removeFigurinhaUser(troca.receptor_id,    troca.figurinha_pedido_id);
+  addFigurinhaToUser(troca.solicitante_id, troca.figurinha_pedido_id);
+
+  troca.status = 'aceita';
+  db.users[troca.solicitante_id].stats.trocas_realizadas = (db.users[troca.solicitante_id].stats.trocas_realizadas || 0) + 1;
+  db.users[troca.receptor_id   ].stats.trocas_realizadas = (db.users[troca.receptor_id   ].stats.trocas_realizadas || 0) + 1;
+  saveDB();
+  return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CANVAS — geração de imagem simples (texto puro) sem canvas nativo
+// Substitua por sua implementação canvas real se quiser imagens gráficas
+// ═══════════════════════════════════════════════════════════════════════════════
+function gerarImagemPacote(figurinhas) {
+  // Gera um PNG minimalista 1x1 transparente como placeholder
+  // Troque por sua lógica canvas real de gerarFigurinha.js
+  return Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    'base64'
+  );
+}
+function gerarImagemFigurinha(fig) { return gerarImagemPacote([fig]); }
+function gerarPaginaAlbum(figs, pag, total, user) { return gerarImagemPacote([]); }
 
 // ─── HELPER: verificar canal ──────────────────────────────────────────────────
 function checkCanal(message) {
@@ -28,11 +336,6 @@ function embed(titulo, desc, cor = '#e53935') {
     .setFooter({ text: '⚽ Álbum da Copa 2022' });
 }
 
-// ─── HELPER: raridade emoji ───────────────────────────────────────────────────
-const RARIDADE_EMOJI = {
-  comum: '⚪', rara: '🔵', epica: '🟣', lendaria: '🟠', cromada: '⭐'
-};
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // COMANDO: !abrirpacote
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -44,11 +347,11 @@ async function cmdAbrirPacote(message) {
 
   const pacotesData = getPacotesUser(userId);
   if (pacotesData.quantidade <= 0) {
-    return message.reply(embed(
+    return message.reply({ embeds: [embed(
       '❌ Sem Pacotes!',
-      `Você não tem pacotes disponíveis!\n\n**Como conseguir pacotes:**\n• 🔊 Fique em call\n• 🎮 Participe de minigames\n• 🛒 Use \`!comprarpacote\`\n• 🎁 Participe de eventos`,
+      'Você não tem pacotes disponíveis!\n\n**Como conseguir:**\n• 🛒 `!comprarpacote`\n• 👑 Peça a um admin',
       '#c62828'
-    ));
+    )] });
   }
 
   const msg = await message.reply({ embeds: [embed('⏳ Abrindo pacote...', 'Gerando suas figurinhas...')] });
@@ -56,15 +359,15 @@ async function cmdAbrirPacote(message) {
   try {
     const figurinhas = abrirPacote(userId);
     if (!figurinhas) {
-      return msg.edit({ embeds: [embed('❌ Erro', 'Não foi possível abrir o pacote. Tente novamente.')] });
+      return msg.edit({ embeds: [embed('❌ Erro', 'Não foi possível abrir o pacote.')] });
     }
 
     const imgBuffer = gerarImagemPacote(figurinhas);
     const attachment = new AttachmentBuilder(imgBuffer, { name: 'pacote.png' });
 
-    // Verificar novidades
+    // Figurinhas novas (quantidade == 1 após adicionar)
     const novas = figurinhas.filter(f => {
-      const col = queries.getUserFigurinha.get(userId, f.id);
+      const col = getUserFigurinha(userId, f.id);
       return col && col.quantidade === 1;
     });
 
@@ -77,16 +380,16 @@ async function cmdAbrirPacote(message) {
 
     const e = new EmbedBuilder()
       .setTitle('📦 Pacote Aberto!')
-      .setDescription(`**Destaques:**\n${destaques}\n\n✨ **${novas.length} nova(s)** figurinha(s) adicionada(s) à coleção!`)
+      .setDescription(`**Destaques:**\n${destaques}\n\n✨ **${novas.length} nova(s)** figurinha(s) adicionada(s)!`)
       .addFields(
         { name: '📦 Pacotes Restantes', value: String(pacotesRestantes.quantidade), inline: true },
-        { name: '📊 Figurinhas no Total', value: String(figurinhas.length), inline: true },
-        { name: '🆕 Novas', value: String(novas.length), inline: true },
+        { name: '📊 Figurinhas Ganhas', value: String(figurinhas.length), inline: true },
+        { name: '🆕 Novas',             value: String(novas.length), inline: true },
       )
       .setImage('attachment://pacote.png')
       .setColor('#e53935')
       .setTimestamp()
-      .setFooter({ text: `⚽ Álbum da Copa 2022 • Use !album para ver sua coleção` });
+      .setFooter({ text: '⚽ Álbum da Copa 2022 • Use !album para ver sua coleção' });
 
     await msg.edit({ embeds: [e], files: [attachment] });
   } catch (err) {
@@ -103,17 +406,17 @@ async function cmdFigurinha(message, args) {
 
   const id = parseInt(args[0]);
   if (isNaN(id) || id < 1) {
-    return message.reply(embed('❌ ID inválido', 'Use: `!figurinha <id>`\nEx: `!figurinha 42`'));
+    return message.reply({ embeds: [embed('❌ ID inválido', 'Use: `!figurinha <id>`\nEx: `!figurinha 42`')] });
   }
 
-  const fig = queries.getFigurinha.get(id);
+  const fig = getFigurinha(id);
   if (!fig) {
-    return message.reply(embed('❌ Figurinha não encontrada', `A figurinha #${id} não existe. O álbum tem IDs de 1 a 980.`));
+    return message.reply({ embeds: [embed('❌ Não encontrada', `A figurinha #${id} não existe. (IDs: 1–980)`)] });
   }
 
-  const userId = message.author.id;
-  const naColecao = queries.getUserFigurinha.get(userId, id);
-  const cfg = RARIDADE_CONFIG[fig.raridade] || RARIDADE_CONFIG.comum;
+  const userId    = message.author.id;
+  const naColecao = getUserFigurinha(userId, id);
+  const cfg       = RARIDADE_CONFIG[fig.raridade] || RARIDADE_CONFIG.comum;
 
   const msg = await message.reply({ embeds: [embed('⏳', 'Gerando figurinha...')] });
 
@@ -124,13 +427,19 @@ async function cmdFigurinha(message, args) {
     const e = new EmbedBuilder()
       .setTitle(`${RARIDADE_EMOJI[fig.raridade]} ${fig.nome}`)
       .addFields(
-        { name: '🌍 País', value: fig.pais, inline: true },
-        { name: '🎯 Posição', value: fig.posicao, inline: true },
-        { name: '⭐ Overall', value: String(fig.overall), inline: true },
-        { name: '💎 Raridade', value: cfg.label, inline: true },
-        { name: '🏆 Grupo', value: fig.grupo || 'N/A', inline: true },
-        { name: '📁 Tipo', value: (fig.tipo || 'jogador').toUpperCase(), inline: true },
-        { name: '📦 Na sua coleção', value: naColecao ? `✅ Você tem **${naColecao.quantidade}x** desta figurinha` : '❌ Você não tem esta figurinha', inline: false },
+        { name: '🌍 País',    value: fig.pais,                    inline: true },
+        { name: '🎯 Posição', value: fig.posicao,                 inline: true },
+        { name: '⭐ Overall', value: String(fig.overall),         inline: true },
+        { name: '💎 Raridade',value: cfg.label,                   inline: true },
+        { name: '🏆 Grupo',   value: fig.grupo || 'N/A',          inline: true },
+        { name: '📁 Tipo',    value: (fig.tipo || 'jogador').toUpperCase(), inline: true },
+        {
+          name:  '📦 Na sua coleção',
+          value: naColecao
+            ? `✅ Você tem **${naColecao.quantidade}x** desta figurinha`
+            : '❌ Você não tem esta figurinha',
+          inline: false,
+        },
       )
       .setImage(`attachment://figurinha_${id}.png`)
       .setColor(fig.cor_primaria || '#e53935')
@@ -153,30 +462,28 @@ async function cmdColecao(message, args) {
   const userId = message.author.id;
   ensureUser(userId);
 
-  const colecao = queries.getColecaoUser.all(userId);
+  const colecao = getColecaoUser(userId);
   if (colecao.length === 0) {
-    return message.reply(embed('📂 Coleção Vazia', 'Você ainda não tem figurinhas!\nAbra pacotes com `!abrirpacote`'));
+    return message.reply({ embeds: [embed('📂 Coleção Vazia', 'Você ainda não tem figurinhas!\nAbra pacotes com `!abrirpacote`')] });
   }
 
   const { unicas, total, percentual } = getPercentualAlbum(userId);
-  const pagina = Math.max(1, parseInt(args[0]) || 1);
-  const itensPorPagina = 20;
-  const totalPaginas = Math.ceil(total / itensPorPagina);
+  const pagina       = Math.max(1, parseInt(args[0]) || 1);
+  const itensPorPag  = 20;
+  const allFigs      = getAllFigurinhas();
+  const totalPaginas = Math.ceil(allFigs.length / itensPorPag);
 
-  const allFigurinhas = queries.getAllFigurinhas.all();
-  const colecaoMap = new Map(colecao.map(c => [c.figurinha_id, c]));
-
-  const paginaFigs = allFigurinhas
-    .slice((pagina - 1) * itensPorPagina, pagina * itensPorPagina)
-    .map(f => ({ fig: f, tem: colecaoMap.has(f.id) }));
+  const colMap   = new Map(colecao.map(c => [c.figurinha_id, c]));
+  const paginaFigs = allFigs
+    .slice((pagina - 1) * itensPorPag, pagina * itensPorPag)
+    .map(f => ({ fig: f, tem: colMap.has(f.id) }));
 
   const msg = await message.reply({ embeds: [embed('⏳', `Gerando página ${pagina}...`)] });
 
   try {
-    const imgBuffer = gerarPaginaAlbum(paginaFigs, pagina, totalPaginas, message.author);
+    const imgBuffer  = gerarPaginaAlbum(paginaFigs, pagina, totalPaginas, message.author);
     const attachment = new AttachmentBuilder(imgBuffer, { name: 'colecao.png' });
 
-    // Resumo por raridade
     const porRaridade = colecao.reduce((acc, f) => {
       acc[f.raridade] = (acc[f.raridade] || 0) + 1;
       return acc;
@@ -188,11 +495,11 @@ async function cmdColecao(message, args) {
 
     const e = new EmbedBuilder()
       .setTitle(`📖 Coleção de ${message.author.username}`)
-      .setDescription(`**Progresso:** ${unicas}/${total} figurinhas únicas (${percentual}%)\n\n${resumo}`)
+      .setDescription(`**Progresso:** ${unicas}/${total} únicas (${percentual}%)\n\n${resumo}`)
       .addFields(
-        { name: '📄 Página', value: `${pagina}/${totalPaginas}`, inline: true },
-        { name: '📦 Total coletado', value: String(colecao.reduce((a, c) => a + c.quantidade, 0)), inline: true },
-        { name: '✅ Únicas', value: String(unicas), inline: true },
+        { name: '📄 Página',       value: `${pagina}/${totalPaginas}`, inline: true },
+        { name: '📦 Total coletado',value: String(colecao.reduce((a, c) => a + c.quantidade, 0)), inline: true },
+        { name: '✅ Únicas',        value: String(unicas), inline: true },
       )
       .setImage('attachment://colecao.png')
       .setColor('#e53935')
@@ -215,40 +522,36 @@ async function cmdAlbum(message) {
   const userId = message.author.id;
   ensureUser(userId);
 
-  const stats = queries.getStats.get(userId) || {};
   const { unicas, total, percentual } = getPercentualAlbum(userId);
-  const pacotes = getPacotesUser(userId);
+  const pacotes  = getPacotesUser(userId);
+  const stats    = loadDB().users[userId].stats || {};
+  const colecao  = getColecaoUser(userId);
+  const db       = loadDB();
 
-  const porRaridade = {
-    comum: 0, rara: 0, epica: 0, lendaria: 0, cromada: 0,
-    ...Object.fromEntries(
-      db.prepare(`
-        SELECT f.raridade, COUNT(*) as count
-        FROM colecao c JOIN figurinhas f ON c.figurinha_id = f.id
-        WHERE c.user_id = ? GROUP BY f.raridade
-      `).all(userId).map(r => [r.raridade, r.count])
-    )
-  };
+  const porRaridade = { comum: 0, rara: 0, epica: 0, lendaria: 0, cromada: 0 };
+  for (const { figurinha_id } of colecao) {
+    const fig = db.figurinhas[figurinha_id];
+    if (fig) porRaridade[fig.raridade] = (porRaridade[fig.raridade] || 0) + 1;
+  }
 
-  // Barra de progresso
   const barLen = 20;
   const filled = Math.round((unicas / total) * barLen);
-  const barra = '█'.repeat(filled) + '░'.repeat(barLen - filled);
+  const barra  = '█'.repeat(filled) + '░'.repeat(barLen - filled);
 
   const e = new EmbedBuilder()
     .setTitle(`📖 Álbum de ${message.author.username}`)
     .setThumbnail(message.author.displayAvatarURL())
     .setDescription(`**Progresso Geral**\n\`[${barra}]\` ${percentual}%\n${unicas} de ${total} figurinhas únicas`)
     .addFields(
-      { name: '⚪ Comuns', value: String(porRaridade.comum), inline: true },
-      { name: '🔵 Raras', value: String(porRaridade.rara), inline: true },
-      { name: '🟣 Épicas', value: String(porRaridade.epica), inline: true },
-      { name: '🟠 Lendárias', value: String(porRaridade.lendaria), inline: true },
-      { name: '⭐ Cromadas', value: String(porRaridade.cromada), inline: true },
-      { name: '📦 Pacotes', value: String(pacotes.quantidade), inline: true },
+      { name: '⚪ Comuns',         value: String(porRaridade.comum),    inline: true },
+      { name: '🔵 Raras',          value: String(porRaridade.rara),     inline: true },
+      { name: '🟣 Épicas',         value: String(porRaridade.epica),    inline: true },
+      { name: '🟠 Lendárias',      value: String(porRaridade.lendaria), inline: true },
+      { name: '⭐ Cromadas',        value: String(porRaridade.cromada),  inline: true },
+      { name: '📦 Pacotes',         value: String(pacotes.quantidade),   inline: true },
       { name: '📦 Pacotes Abertos', value: String(pacotes.total_abertos || 0), inline: true },
-      { name: '🔄 Trocas', value: String(stats.trocas_realizadas || 0), inline: true },
-      { name: '📊 Total Coletado', value: String(stats.total_figurinhas || 0), inline: true },
+      { name: '🔄 Trocas',          value: String(stats.trocas_realizadas || 0), inline: true },
+      { name: '📊 Total Coletado',  value: String(stats.total_figurinhas || 0),  inline: true },
     )
     .setColor('#e53935')
     .setTimestamp()
@@ -264,45 +567,39 @@ async function cmdTrocar(message, args) {
   if (!checkCanal(message)) return;
 
   const receptor = message.mentions.users.first();
-  if (!receptor) return message.reply(embed('❌ Erro', 'Mencione um usuário: `!trocar @usuario <id_oferta> <id_pedido>`'));
-  if (receptor.id === message.author.id) return message.reply(embed('❌ Erro', 'Você não pode trocar consigo mesmo!'));
+  if (!receptor) return message.reply({ embeds: [embed('❌ Erro', 'Mencione um usuário: `!trocar @usuario <id_oferta> <id_pedido>`')] });
+  if (receptor.id === message.author.id) return message.reply({ embeds: [embed('❌ Erro', 'Você não pode trocar consigo mesmo!')] });
 
   const idOferta = parseInt(args[1]);
   const idPedido = parseInt(args[2]);
 
   if (isNaN(idOferta) || isNaN(idPedido)) {
-    return message.reply(embed('❌ Erro', 'IDs inválidos!\nUso: `!trocar @usuario <id_oferta> <id_pedido>`\nEx: `!trocar @João 42 100`'));
+    return message.reply({ embeds: [embed('❌ Erro', 'IDs inválidos!\nUso: `!trocar @usuario <id_oferta> <id_pedido>`')] });
   }
 
-  const figOferta = queries.getFigurinha.get(idOferta);
-  const figPedido = queries.getFigurinha.get(idPedido);
+  const figOferta = getFigurinha(idOferta);
+  const figPedido = getFigurinha(idPedido);
+  if (!figOferta || !figPedido) return message.reply({ embeds: [embed('❌', 'Uma das figurinhas não existe.')] });
 
-  if (!figOferta || !figPedido) {
-    return message.reply(embed('❌ Figurinha não existe', 'Uma das figurinhas informadas não existe.'));
-  }
-
-  const colOferta = queries.getUserFigurinha.get(message.author.id, idOferta);
+  const colOferta = getUserFigurinha(message.author.id, idOferta);
   if (!colOferta || colOferta.quantidade < 1) {
-    return message.reply(embed('❌ Sem essa figurinha', `Você não tem a figurinha **${figOferta.nome}** (ID: ${idOferta}) para oferecer!`));
+    return message.reply({ embeds: [embed('❌', `Você não tem a figurinha **${figOferta.nome}** (ID: ${idOferta})!`)] });
   }
 
   if (colOferta.quantidade < 2) {
-    return message.reply(embed('⚠️ Atenção', `Você só tem 1x **${figOferta.nome}**. Certeza que quer trocar sua única cópia?\nResponda com \`!confirmartroca ${idOferta} ${idPedido} ${receptor.id}\``));
+    return message.reply({ embeds: [embed('⚠️ Atenção', `Você só tem 1x **${figOferta.nome}**. Use \`!confirmartroca ${idOferta} ${idPedido} ${receptor.id}\` para confirmar mesmo assim.`)] });
   }
 
-  // Criar proposta de troca
-  const result = queries.criarTroca.run(message.author.id, receptor.id, idOferta, idPedido);
-  const trocaId = result.lastInsertRowid;
+  const trocaId = criarTroca(message.author.id, receptor.id, idOferta, idPedido);
 
   const e = new EmbedBuilder()
     .setTitle('🔄 Proposta de Troca Enviada!')
-    .setDescription(`${receptor}, você recebeu uma proposta de troca de ${message.author}!`)
+    .setDescription(`${receptor}, você recebeu uma proposta de ${message.author}!\nUse \`!aceitartroca ${trocaId}\` para aceitar ou \`!recusartroca ${trocaId}\` para recusar.`)
     .addFields(
-      { name: `📤 ${message.author.username} oferece`, value: `${RARIDADE_EMOJI[figOferta.raridade]} **${figOferta.nome}** (${figOferta.pais}) - OVR ${figOferta.overall}\n ID: \`#${idOferta}\``, inline: true },
-      { name: `📥 E quer`, value: `${RARIDADE_EMOJI[figPedido.raridade]} **${figPedido.nome}** (${figPedido.pais}) - OVR ${figPedido.overall}\nID: \`#${idPedido}\``, inline: true },
+      { name: `📤 ${message.author.username} oferece`, value: `${RARIDADE_EMOJI[figOferta.raridade]} **${figOferta.nome}** (${figOferta.pais}) - OVR ${figOferta.overall}\nID: \`#${idOferta}\``, inline: true },
+      { name: '📥 E quer', value: `${RARIDADE_EMOJI[figPedido.raridade]} **${figPedido.nome}** (${figPedido.pais}) - OVR ${figPedido.overall}\nID: \`#${idPedido}\``, inline: true },
+      { name: '📋 ID da Troca', value: `\`#${trocaId}\``, inline: false },
     )
-    .addFields({ name: '📋 ID da Troca', value: `\`#${trocaId}\``, inline: false })
-    .setDescription(`${receptor}, você recebeu uma proposta!\nUse \`!aceitartroca ${trocaId}\` para aceitar ou \`!recusartroca ${trocaId}\` para recusar.`)
     .setColor('#ff9800')
     .setTimestamp();
 
@@ -316,46 +613,46 @@ async function cmdAceitarTroca(message, args) {
   if (!checkCanal(message)) return;
 
   const trocaId = parseInt(args[0]);
-  if (isNaN(trocaId)) return message.reply(embed('❌', 'ID de troca inválido.'));
+  if (isNaN(trocaId)) return message.reply({ embeds: [embed('❌', 'ID de troca inválido.')] });
 
-  const troca = queries.getTroca.get(trocaId);
-  if (!troca) return message.reply(embed('❌', 'Troca não encontrada.'));
-  if (troca.receptor_id !== message.author.id) return message.reply(embed('❌', 'Essa troca não é para você!'));
-  if (troca.status !== 'pendente') return message.reply(embed('❌', `Essa troca já foi ${troca.status}.`));
+  const troca = getTroca(trocaId);
+  if (!troca) return message.reply({ embeds: [embed('❌', 'Troca não encontrada.')] });
+  if (troca.receptor_id !== message.author.id) return message.reply({ embeds: [embed('❌', 'Essa troca não é para você!')] });
+  if (troca.status !== 'pendente') return message.reply({ embeds: [embed('❌', `Essa troca já foi ${troca.status}.`)] });
 
-  const colPedido = queries.getUserFigurinha.get(message.author.id, troca.figurinha_pedido_id);
+  const colPedido = getUserFigurinha(message.author.id, troca.figurinha_pedido_id);
   if (!colPedido || colPedido.quantidade < 1) {
-    return message.reply(embed('❌', 'Você não tem a figurinha que foi pedida!'));
+    return message.reply({ embeds: [embed('❌', 'Você não tem a figurinha que foi pedida!')] });
   }
 
   const sucesso = executarTroca(trocaId);
-  if (!sucesso) return message.reply(embed('❌ Falha', 'A troca falhou. Verifique se ambas as figurinhas ainda estão disponíveis.'));
+  if (!sucesso) return message.reply({ embeds: [embed('❌ Falha', 'A troca falhou. Verifique se ambas as figurinhas ainda estão disponíveis.')] });
 
-  const figOferta = queries.getFigurinha.get(troca.figurinha_oferta_id);
-  const figPedido = queries.getFigurinha.get(troca.figurinha_pedido_id);
+  const figOferta = getFigurinha(troca.figurinha_oferta_id);
+  const figPedido = getFigurinha(troca.figurinha_pedido_id);
 
-  message.reply(embed(
+  message.reply({ embeds: [embed(
     '✅ Troca Realizada!',
-    `**Troca #${trocaId} concluída com sucesso!**\n\n<@${troca.solicitante_id}> recebeu: ${RARIDADE_EMOJI[figPedido.raridade]} **${figPedido.nome}**\n<@${troca.receptor_id}> recebeu: ${RARIDADE_EMOJI[figOferta.raridade]} **${figOferta.nome}**`,
+    `**Troca #${trocaId} concluída!**\n\n<@${troca.solicitante_id}> recebeu: ${RARIDADE_EMOJI[figPedido.raridade]} **${figPedido.nome}**\n<@${troca.receptor_id}> recebeu: ${RARIDADE_EMOJI[figOferta.raridade]} **${figOferta.nome}**`,
     '#4caf50'
-  ));
+  )] });
 }
 
 async function cmdRecusarTroca(message, args) {
   if (!checkCanal(message)) return;
 
   const trocaId = parseInt(args[0]);
-  if (isNaN(trocaId)) return message.reply(embed('❌', 'ID de troca inválido.'));
+  if (isNaN(trocaId)) return message.reply({ embeds: [embed('❌', 'ID de troca inválido.')] });
 
-  const troca = queries.getTroca.get(trocaId);
-  if (!troca) return message.reply(embed('❌', 'Troca não encontrada.'));
+  const troca = getTroca(trocaId);
+  if (!troca) return message.reply({ embeds: [embed('❌', 'Troca não encontrada.')] });
   if (troca.receptor_id !== message.author.id && troca.solicitante_id !== message.author.id) {
-    return message.reply(embed('❌', 'Você não faz parte dessa troca!'));
+    return message.reply({ embeds: [embed('❌', 'Você não faz parte dessa troca!')] });
   }
-  if (troca.status !== 'pendente') return message.reply(embed('❌', `Essa troca já foi ${troca.status}.`));
+  if (troca.status !== 'pendente') return message.reply({ embeds: [embed('❌', `Essa troca já foi ${troca.status}.`)] });
 
-  queries.atualizarTroca.run('recusada', trocaId);
-  message.reply(embed('❌ Troca Recusada', `A troca #${trocaId} foi cancelada.`, '#f44336'));
+  atualizarTroca(trocaId, 'recusada');
+  message.reply({ embeds: [embed('❌ Troca Recusada', `A troca #${trocaId} foi cancelada.`, '#f44336')] });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -365,34 +662,31 @@ async function cmdDarFigurinha(message, args) {
   if (!checkCanal(message)) return;
 
   const receptor = message.mentions.users.first();
-  if (!receptor) return message.reply(embed('❌', 'Mencione um usuário: `!darfigurinha @usuario <id>`'));
-  if (receptor.id === message.author.id) return message.reply(embed('❌', 'Você não pode dar figurinha para si mesmo!'));
+  if (!receptor) return message.reply({ embeds: [embed('❌', 'Mencione um usuário: `!darfigurinha @usuario <id>`')] });
+  if (receptor.id === message.author.id) return message.reply({ embeds: [embed('❌', 'Você não pode dar figurinha para si mesmo!')] });
 
-  const id = parseInt(args[1]);
-  if (isNaN(id)) return message.reply(embed('❌', 'ID inválido.'));
+  const id  = parseInt(args[1]);
+  if (isNaN(id)) return message.reply({ embeds: [embed('❌', 'ID inválido.')] });
 
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) return message.reply(embed('❌', 'Figurinha não encontrada.'));
+  const fig = getFigurinha(id);
+  if (!fig) return message.reply({ embeds: [embed('❌', 'Figurinha não encontrada.')] });
 
-  const col = queries.getUserFigurinha.get(message.author.id, id);
+  const col = getUserFigurinha(message.author.id, id);
   if (!col || col.quantidade < 1) {
-    return message.reply(embed('❌', `Você não tem a figurinha **${fig.nome}**!`));
+    return message.reply({ embeds: [embed('❌', `Você não tem a figurinha **${fig.nome}**!`)] });
   }
-
   if (col.quantidade < 2) {
-    return message.reply(embed('⚠️', `Você só tem 1x desta figurinha. Use \`!trocar\` para uma troca oficial.`));
+    return message.reply({ embeds: [embed('⚠️', 'Você só tem 1x desta figurinha. Use `!trocar` para uma troca oficial.')] });
   }
 
-  // Transferir
-  queries.removeFigurinhaUser.run(message.author.id, id);
-  db.prepare('DELETE FROM colecao WHERE user_id = ? AND figurinha_id = ? AND quantidade <= 0').run(message.author.id, id);
+  removeFigurinhaUser(message.author.id, id);
   addFigurinhaToUser(receptor.id, id);
 
-  message.reply(embed(
+  message.reply({ embeds: [embed(
     '🎁 Figurinha Enviada!',
-    `${message.author} deu a figurinha ${RARIDADE_EMOJI[fig.raridade]} **${fig.nome}** para ${receptor}!`,
+    `${message.author} deu ${RARIDADE_EMOJI[fig.raridade]} **${fig.nome}** para ${receptor}!`,
     '#4caf50'
-  ));
+  )] });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -401,34 +695,32 @@ async function cmdDarFigurinha(message, args) {
 async function cmdVenderFigurinha(message, args) {
   if (!checkCanal(message)) return;
 
-  const id = parseInt(args[0]);
+  const id  = parseInt(args[0]);
   const qtd = parseInt(args[1]) || 1;
-  if (isNaN(id)) return message.reply(embed('❌', 'Uso: `!venderfigurinha <id> [quantidade]`'));
+  if (isNaN(id)) return message.reply({ embeds: [embed('❌', 'Uso: `!venderfigurinha <id> [quantidade]`')] });
 
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) return message.reply(embed('❌', 'Figurinha não encontrada.'));
+  const fig = getFigurinha(id);
+  if (!fig) return message.reply({ embeds: [embed('❌', 'Figurinha não encontrada.')] });
 
-  const col = queries.getUserFigurinha.get(message.author.id, id);
+  const col = getUserFigurinha(message.author.id, id);
   if (!col || col.quantidade < qtd + 1) {
-    return message.reply(embed('❌', `Você precisa ter pelo menos ${qtd + 1}x desta figurinha para vender ${qtd}x (mantendo 1 cópia).`));
+    return message.reply({ embeds: [embed('❌', `Você precisa ter pelo menos ${qtd + 1}x desta figurinha para vender ${qtd}x (mantendo 1 cópia).`)] });
   }
 
-  // Calcular preço baseado na raridade
-  const PRECO_RARIDADE = { comum: 50, rara: 150, epica: 400, lendaria: 1000, cromada: 3000 };
   const preco = (PRECO_RARIDADE[fig.raridade] || 50) * qtd;
 
-  // Remover figurinhas
-  for (let i = 0; i < qtd; i++) {
-    queries.removeFigurinhaUser.run(message.author.id, id);
-  }
-  db.prepare('DELETE FROM colecao WHERE user_id = ? AND figurinha_id = ? AND quantidade <= 0').run(message.author.id, id);
+  for (let i = 0; i < qtd; i++) removeFigurinhaUser(message.author.id, id);
 
-  // Nota: integração com sistema de economia do servidor
-  message.reply(embed(
+  // Creditar moedas no DB
+  const db = loadDB();
+  db.users[message.author.id].moedas = (db.users[message.author.id].moedas || 0) + preco;
+  saveDB();
+
+  message.reply({ embeds: [embed(
     '💰 Figurinha Vendida!',
-    `Você vendeu **${qtd}x ${fig.nome}** por **${preco} moedas**!\n\n*(Integrando com o sistema de economia do servidor)*`,
+    `Você vendeu **${qtd}x ${fig.nome}** por **${preco} moedas**!\n💰 Saldo atual: **${db.users[message.author.id].moedas} moedas**`,
     '#ffc107'
-  ));
+  )] });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -437,18 +729,27 @@ async function cmdVenderFigurinha(message, args) {
 async function cmdComprarPacote(message, args) {
   if (!checkCanal(message)) return;
 
-  const qtd = Math.min(parseInt(args[0]) || 1, 10); // máx 10 por vez
+  const qtd   = Math.min(parseInt(args[0]) || 1, 10);
   const total = PRECO_PACOTE * qtd;
 
-  // Nota: integrar com o sistema de economia do servidor
-  // Aqui damos direto (demonstração) — integre com seu bot de economia
-  addPacotesUser(message.author.id, qtd);
+  const db      = loadDB();
+  const userId  = message.author.id;
+  ensureUser(userId);
 
-  message.reply(embed(
+  const moedas = db.users[userId].moedas || 0;
+  if (moedas < total) {
+    return message.reply({ embeds: [embed('❌ Moedas insuficientes', `Você tem **${moedas} moedas** e precisa de **${total} moedas**.\n\nVenda figurinhas repetidas com \`!venderfigurinha\` para ganhar moedas!`)] });
+  }
+
+  db.users[userId].moedas -= total;
+  saveDB();
+  addPacotesUser(userId, qtd);
+
+  message.reply({ embeds: [embed(
     '🛒 Pacotes Comprados!',
-    `Você comprou **${qtd}x pacote(s)** por **${total} moedas**!\n\nUse \`!abrirpacote\` para abrir.`,
+    `Você comprou **${qtd}x pacote(s)** por **${total} moedas**!\n💰 Saldo restante: **${db.users[userId].moedas} moedas**\n\nUse \`!abrirpacote\` para abrir.`,
     '#4caf50'
-  ));
+  )] });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -457,24 +758,24 @@ async function cmdComprarPacote(message, args) {
 async function cmdRankingAlbum(message) {
   if (!checkCanal(message)) return;
 
-  const ranking = queries.getRanking.all();
+  const ranking = getRanking();
   if (ranking.length === 0) {
-    return message.reply(embed('🏆 Ranking', 'Ninguém tem figurinhas ainda!'));
+    return message.reply({ embeds: [embed('🏆 Ranking', 'Ninguém tem figurinhas ainda!')] });
   }
 
   const medals = ['🥇', '🥈', '🥉'];
-  const total = db.prepare('SELECT COUNT(*) as t FROM figurinhas').get().t;
+  const total  = getAllFigurinhas().length;
 
   let desc = '';
   for (let i = 0; i < ranking.length; i++) {
-    const r = ranking[i];
-    const medal = medals[i] || `**${i + 1}.**`;
-    const percentual = ((r.figurinhas_unicas / total) * 100).toFixed(1);
+    const r       = ranking[i];
+    const medal   = medals[i] || `**${i + 1}.**`;
+    const pct     = ((r.figurinhas_unicas / total) * 100).toFixed(1);
     try {
       const user = await message.client.users.fetch(r.user_id);
-      desc += `${medal} **${user.username}** — ${r.figurinhas_unicas}/${total} únicas (${percentual}%) | ⭐${r.cromadas} cromadas | 🟠${r.lendarias} lendárias\n`;
+      desc += `${medal} **${user.username}** — ${r.figurinhas_unicas}/${total} únicas (${pct}%) | ⭐${r.cromadas} cromadas | 🟠${r.lendarias} lendárias\n`;
     } catch {
-      desc += `${medal} \`${r.user_id}\` — ${r.figurinhas_unicas} únicas (${percentual}%)\n`;
+      desc += `${medal} \`${r.user_id}\` — ${r.figurinhas_unicas} únicas (${pct}%)\n`;
     }
   }
 
@@ -489,54 +790,121 @@ async function cmdRankingAlbum(message) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// COMANDO: !datac — envia data.json via DM para quem pediu (admin only)
+// ═══════════════════════════════════════════════════════════════════════════════
+async function cmdDataC(message) {
+  if (!checkCanal(message)) return;
+
+  // Apenas admins podem baixar o DB completo
+  if (!isAdmin(message)) {
+    return message.reply({ embeds: [embed('❌ Sem Permissão', 'Somente administradores podem baixar o banco de dados!')] });
+  }
+
+  if (!fs.existsSync(DATA_FILE)) {
+    return message.reply({ embeds: [embed('❌ Arquivo não encontrado', 'O arquivo `data.json` ainda não foi criado. Abra alguns pacotes primeiro!')] });
+  }
+
+  try {
+    // Snapshot formatado do DB atual
+    const dbSnapshot  = loadDB();
+    const jsonContent = JSON.stringify(dbSnapshot, null, 2);
+    const buffer      = Buffer.from(jsonContent, 'utf8');
+
+    const timestamp  = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const attachment = new AttachmentBuilder(buffer, { name: `data_backup_${timestamp}.json` });
+
+    // Tentar enviar via DM
+    try {
+      await message.author.send({
+        content: `📦 **Backup do banco de dados — ${new Date().toLocaleString('pt-BR')}**\n\n` +
+                 `• **Usuários:** ${Object.keys(dbSnapshot.users).length}\n` +
+                 `• **Trocas:** ${Object.keys(dbSnapshot.trocas).length}\n` +
+                 `• **Figurinhas no catálogo:** ${Object.keys(dbSnapshot.figurinhas).length}\n\n` +
+                 `⚠️ Guarde este arquivo em local seguro!`,
+        files: [attachment],
+      });
+
+      message.reply({ embeds: [embed('✅ Enviado!', `O arquivo \`data.json\` foi enviado para sua DM, ${message.author}! 📬`, '#4caf50')] });
+    } catch (dmErr) {
+      // DM bloqueada — enviar no canal como fallback (apenas se o bot tiver permissão)
+      console.warn('DM bloqueada, enviando no canal:', dmErr.message);
+      await message.reply({
+        content: `⚠️ Não consegui enviar via DM (${message.author}, verifique se suas DMs estão abertas). Enviando aqui:`,
+        files: [attachment],
+      });
+    }
+  } catch (err) {
+    console.error('Erro ao gerar datac:', err);
+    message.reply({ embeds: [embed('❌ Erro', 'Ocorreu um erro ao gerar o arquivo de dados.')] });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // COMANDOS ADM
 // ═══════════════════════════════════════════════════════════════════════════════
-
 function isAdmin(message) {
   return message.member?.permissions.has('Administrator') ||
-    message.member?.permissions.has('ManageGuild');
+         message.member?.permissions.has('ManageGuild');
 }
 
 async function cmdAdmDarPacotes(message, args) {
-  if (!isAdmin(message)) return message.reply(embed('❌', 'Sem permissão!'));
+  if (!isAdmin(message)) return message.reply({ embeds: [embed('❌', 'Sem permissão!')] });
 
   const target = message.mentions.users.first();
-  const qtd = parseInt(args[1]) || 1;
-  if (!target) return message.reply(embed('❌', 'Mencione um usuário.'));
+  const qtd    = parseInt(args[1]) || 1;
+  if (!target) return message.reply({ embeds: [embed('❌', 'Mencione um usuário.')] });
 
   addPacotesUser(target.id, qtd);
-  message.reply(embed('✅', `**${qtd}x pacote(s)** adicionado(s) para ${target}!`, '#4caf50'));
+  message.reply({ embeds: [embed('✅', `**${qtd}x pacote(s)** adicionado(s) para ${target}!`, '#4caf50')] });
 }
 
 async function cmdAdmDarFigurinha(message, args) {
-  if (!isAdmin(message)) return message.reply(embed('❌', 'Sem permissão!'));
+  if (!isAdmin(message)) return message.reply({ embeds: [embed('❌', 'Sem permissão!')] });
 
   const target = message.mentions.users.first();
-  const id = parseInt(args[1]);
-  if (!target || isNaN(id)) return message.reply(embed('❌', 'Uso: `!darfigurinhaadm @usuario <id>`'));
+  const id     = parseInt(args[1]);
+  if (!target || isNaN(id)) return message.reply({ embeds: [embed('❌', 'Uso: `!darfigurinhaadm @usuario <id>`')] });
 
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) return message.reply(embed('❌', 'Figurinha não encontrada.'));
+  const fig = getFigurinha(id);
+  if (!fig) return message.reply({ embeds: [embed('❌', 'Figurinha não encontrada.')] });
 
   addFigurinhaToUser(target.id, id);
-  message.reply(embed('✅', `Figurinha **${fig.nome}** (${RARIDADE_EMOJI[fig.raridade]}) dada para ${target}!`, '#4caf50'));
+  message.reply({ embeds: [embed('✅', `Figurinha **${fig.nome}** (${RARIDADE_EMOJI[fig.raridade]}) dada para ${target}!`, '#4caf50')] });
 }
 
 async function cmdAdmResetAlbum(message, args) {
-  if (!isAdmin(message)) return message.reply(embed('❌', 'Sem permissão!'));
+  if (!isAdmin(message)) return message.reply({ embeds: [embed('❌', 'Sem permissão!')] });
 
   const target = message.mentions.users.first();
-  if (!target) return message.reply(embed('❌', 'Mencione um usuário.'));
+  if (!target) return message.reply({ embeds: [embed('❌', 'Mencione um usuário.')] });
 
-  db.prepare('DELETE FROM colecao WHERE user_id = ?').run(target.id);
-  db.prepare('DELETE FROM pacotes_usuario WHERE user_id = ?').run(target.id);
-  db.prepare('DELETE FROM stats_usuario WHERE user_id = ?').run(target.id);
+  const db = loadDB();
+  if (db.users[target.id]) {
+    db.users[target.id] = {
+      colecao: {},
+      pacotes: { quantidade: 0, total_abertos: 0 },
+      stats:   { trocas_realizadas: 0, total_figurinhas: 0 },
+      moedas:  0,
+    };
+    saveDB();
+  }
 
-  message.reply(embed('✅', `Álbum de ${target} resetado!`, '#4caf50'));
+  message.reply({ embeds: [embed('✅', `Álbum de ${target} resetado!`, '#4caf50')] });
 }
 
-async function cmdAdmAddPacotes(message, args) {
-  return cmdAdmDarPacotes(message, args); // alias
+async function cmdAdmAddMoedas(message, args) {
+  if (!isAdmin(message)) return message.reply({ embeds: [embed('❌', 'Sem permissão!')] });
+
+  const target = message.mentions.users.first();
+  const qtd    = parseInt(args[1]) || 0;
+  if (!target || qtd <= 0) return message.reply({ embeds: [embed('❌', 'Uso: `!addmoedas @usuario <quantidade>`')] });
+
+  const db = loadDB();
+  ensureUser(target.id);
+  db.users[target.id].moedas = (db.users[target.id].moedas || 0) + qtd;
+  saveDB();
+
+  message.reply({ embeds: [embed('✅', `**${qtd} moedas** adicionadas para ${target}!\n💰 Saldo atual: **${db.users[target.id].moedas} moedas**`, '#4caf50')] });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -549,14 +917,14 @@ async function cmdHelp(message) {
     .setTitle('⚽ Álbum da Copa 2022 — Comandos')
     .addFields(
       {
-        name: '📦 Pacotes',
+        name:  '📦 Pacotes',
         value: [
           '`!abrirpacote` — Abrir 1 pacote (7 figurinhas)',
-          '`!comprarpacote [qtd]` — Comprar pacotes',
+          '`!comprarpacote [qtd]` — Comprar pacotes com moedas',
         ].join('\n'),
       },
       {
-        name: '📖 Álbum & Coleção',
+        name:  '📖 Álbum & Coleção',
         value: [
           '`!album` — Ver seu álbum e estatísticas',
           '`!colecao [página]` — Ver sua coleção visual',
@@ -565,36 +933,50 @@ async function cmdHelp(message) {
         ].join('\n'),
       },
       {
-        name: '🔄 Trocas & Doações',
+        name:  '🔄 Trocas & Doações',
         value: [
           '`!trocar @user <id_sua> <id_quer>` — Propor troca',
           '`!aceitartroca <id>` — Aceitar proposta',
           '`!recusartroca <id>` — Recusar proposta',
-          '`!darfigurinha @user <id>` — Dar figurinha',
-          '`!venderfigurinha <id> [qtd]` — Vender repetidas',
+          '`!darfigurinha @user <id>` — Dar figurinha (precisa de 2+ cópias)',
+          '`!venderfigurinha <id> [qtd]` — Vender repetidas por moedas',
         ].join('\n'),
       },
       {
-        name: '👑 Admin',
+        name:  '👑 Admin',
         value: [
           '`!addpacotes @user <qtd>` — Dar pacotes',
           '`!darfigurinhaadm @user <id>` — Dar figurinha',
+          '`!addmoedas @user <qtd>` — Dar moedas',
           '`!resetalbum @user` — Resetar álbum',
+          '`!datac` — Baixar backup do banco de dados (DM)',
         ].join('\n'),
       },
       {
-        name: '🌟 Raridades',
+        name:  '🌟 Raridades',
         value: '⚪ Comum (55%) • 🔵 Rara (28%) • 🟣 Épica (12%) • 🟠 Lendária (4%) • ⭐ Cromada (1%)',
+      },
+      {
+        name:  '💰 Economia',
+        value: [
+          'Venda figurinhas repetidas para ganhar moedas',
+          `1 pacote = ${PRECO_PACOTE} moedas`,
+          'Preços: ⚪50 • 🔵150 • 🟣400 • 🟠1000 • ⭐3000 por figurinha',
+        ].join('\n'),
       },
     )
     .setColor('#e53935')
     .setTimestamp()
-    .setFooter({ text: '980 figurinhas para colecionar!' });
+    .setFooter({ text: '980 figurinhas para colecionar! • Dados salvos em system/data.json' });
 
   message.reply({ embeds: [e] });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
 module.exports = {
+  // Comandos de usuário
   cmdAbrirPacote,
   cmdFigurinha,
   cmdColecao,
@@ -606,9 +988,20 @@ module.exports = {
   cmdVenderFigurinha,
   cmdComprarPacote,
   cmdRankingAlbum,
+  cmdHelp,
+  cmdDataC,
+
+  // Comandos admin
   cmdAdmDarPacotes,
   cmdAdmDarFigurinha,
   cmdAdmResetAlbum,
-  cmdAdmAddPacotes,
-  cmdHelp,
+  cmdAdmAddMoedas,
+  cmdAdmAddPacotes: cmdAdmDarPacotes, // alias
+
+  // Utilitários expostos (caso index.js precise)
+  loadDB,
+  saveDB,
+  ensureUser,
+  addPacotesUser,
+  addFigurinhaToUser,
 };
