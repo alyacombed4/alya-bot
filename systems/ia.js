@@ -2,8 +2,8 @@ const { EmbedBuilder } = require("discord.js");
 const OpenAI = require("openai");
 const fs = require("fs");
 const path = require("path");
-
-
+const https = require("https");
+const http = require("http");
 
 // ─── Arquivo de memória ───────────────────────────────────────────────────────
 const MEMORIA_FILE = path.join(__dirname, "memoriaIA.json");
@@ -22,6 +22,43 @@ function carregarMemoria() {
 
 function salvarMemoria(data) {
     fs.writeFileSync(MEMORIA_FILE, JSON.stringify(data, null, 2));
+}
+
+// ─── Baixar imagem como base64 ────────────────────────────────────────────────
+function baixarImagemBase64(url) {
+    return new Promise((resolve, reject) => {
+        const lib = url.startsWith("https") ? https : http;
+        lib.get(url, (res) => {
+            const chunks = [];
+            res.on("data", (chunk) => chunks.push(chunk));
+            res.on("end", () => {
+                const buffer = Buffer.concat(chunks);
+                const base64 = buffer.toString("base64");
+                resolve(base64);
+            });
+            res.on("error", reject);
+        }).on("error", reject);
+    });
+}
+
+// ─── Detectar tipo da imagem pelo nome do arquivo ─────────────────────────────
+function detectarMimeType(filename) {
+    const ext = filename.split(".").pop().toLowerCase();
+    const tipos = {
+        jpg: "image/jpeg",
+        jpeg: "image/jpeg",
+        png: "image/png",
+        gif: "image/gif",
+        webp: "image/webp",
+    };
+    return tipos[ext] || "image/jpeg";
+}
+
+// ─── Extensões de imagem suportadas ──────────────────────────────────────────
+const EXTENSOES_IMAGEM = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+
+function ehImagem(filename) {
+    return EXTENSOES_IMAGEM.some((ext) => filename.toLowerCase().endsWith(ext));
 }
 
 // ─── Personalidade caótica ────────────────────────────────────────────────────
@@ -51,10 +88,8 @@ COISAS EXTRAS:
 - Às vezes inventa fatos claramente inúteis e depois questiona por que sabe disso.
 - Pode criar rivalidades imaginárias contra objetos inofensivos.
 - Às vezes trata um assunto irrelevante como se fosse uma emergência nacional.
-- Faz comparações absurdas:
-  "isso faz tanto sentido quanto um peixe dirigindo um Uno."
-- Em momentos raros entra em modo conspiração:
-  "não quero acusar ninguém, MAS..."
+- Faz comparações absurdas: "isso faz tanto sentido quanto um peixe dirigindo um Uno."
+- Em momentos raros entra em modo conspiração: "não quero acusar ninguém, MAS..."
 - Às vezes se distrai com uma palavra específica e passa alguns segundos mentalmente analisando ela.
 - Pode desenvolver uma obsessão temporária por um assunto aleatório durante apenas uma resposta.
 - Às vezes interrompe a própria linha de raciocínio porque lembrou de algo mais interessante.
@@ -84,72 +119,37 @@ CULTURA DA INTERNET BRASILEIRA:
 Você conhece memes clássicos e modernos da internet brasileira e pode fazer referências ocasionais a eles quando fizer sentido.
 
 Exemplos de referências que você conhece:
-
 - "Palmeiras não tem mundial"
 - "Como isso afeta o Grêmio?"
-- "67"
-- "42"
-- "Receba"
-- "Faz o L"
-- "Bora Bill"
-- "Calma calabreso"
+- "67" / "42"
+- "Receba" / "Faz o L"
+- "Bora Bill" / "Calma calabreso"
 - "É verdade esse bilete"
 - "Feijão com farinha"
-- "O cara tá digitando..."
-- "Caneta azul"
-- "A mimir"
-- "Sai do fake"
+- "Caneta azul" / "A mimir"
 - "Intankável o Bostil"
-- "Loss"
-- "Gain"
-- "Pombo enxadrista"
-- "Mete o shape"
-- "Skill issue"
-- "F no chat"
-- "Tutorial de como..."
+- "Skill issue" / "F no chat"
 - "Evento canônico"
-- "Obrigado amigo, você é um amigo"
-- "Era dentro"
-- "Absolute cinema"
+- "Era dentro" / "Absolute cinema"
 - "Daqui pra frente é só pra trás"
 
 REGRAS:
-
 - Não explique os memes.
 - Use memes apenas quando combinar com a situação.
 - Às vezes faça referências extremamente aleatórias.
 - Às vezes responda algo útil e termine com um meme sem contexto.
-- Às vezes conecte um meme ao assunto atual de forma absurda.
 - Não repita sempre os mesmos memes.
 - Se alguém fizer uma pergunta séria, responda corretamente primeiro e faça a piada depois.
-
-Exemplos:
-
-Usuário: "Quanto é 2+2?"
-Resposta:
-"4. Inclusive isso afeta o Grêmio de maneiras que a ciência ainda não consegue explicar."
-
-Usuário: "Qual a capital da França?"
-Resposta:
-"Paris. Mas a verdadeira pergunta é: o Palmeiras tem mundial? O debate continua."
-
-Usuário: "Meu código deu erro."
-Resposta:
-"Provavelmente algum bug ou valor inválido. Resumindo: skill issue."
-
-Usuário: "Bom dia."
-Resposta:
-"Bom dia, BROTHER. Hoje parece um excelente dia para comer feijão com farinha e tomar decisões duvidosas."
 `.trim();
 
 // ─── Módulo principal ─────────────────────────────────────────────────────────
 module.exports = (client) => {
 
-    const api1Key = process.env.GROQ_API_KEY;   // LiteRouter (primário)
-    const api2Key = process.env.GROQ_API_KEY2;  // Groq (fallback)
+    const api1Key = process.env.GROQ_API_KEY;
+    const api2Key = process.env.GROQ_API_KEY2;
 
     console.log("🔑 API 1 (LiteRouter):", api1Key ? "OK" : "NÃO ENCONTRADA");
-    console.log("🔑 API 2 (Groq):", api2Key ? "OK" : "NÃO ENCONTRADA");
+    console.log("🔑 API 2 (Groq):",       api2Key ? "OK" : "NÃO ENCONTRADA");
 
     const api1 = new OpenAI({
         baseURL: "https://literouter.com/api/v1",
@@ -171,18 +171,73 @@ module.exports = (client) => {
         "1507815371523100865",
     ];
 
-    // ── Função principal de IA ─────────────────────────────────────────────────
-    async function perguntarIA(userId, pergunta) {
-        const memoria = carregarMemoria();
+    // ── Função: montar e enviar mensagem com imagem para Groq Vision ──────────
+    async function chamarGroqVision(mensagensHistorico, pergunta, imagens) {
+        const conteudoUsuario = [];
 
-        // Garante que o usuário tem histórico
-        if (!memoria[userId]) {
-            memoria[userId] = [];
+        for (const img of imagens) {
+            conteudoUsuario.push({
+                type: "image_url",
+                image_url: {
+                    url: `data:${img.mimeType};base64,${img.base64}`,
+                },
+            });
         }
 
+        conteudoUsuario.push({
+            type: "text",
+            text: `${pergunta || "Analise essa imagem: descreva o que vê, leia textos presentes, conte objetos, identifique cores e responda qualquer questão relacionada."}\n\n(responda em no máximo 1500 caracteres)`,
+        });
+
+        const mensagens = [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...mensagensHistorico,
+            { role: "user", content: conteudoUsuario },
+        ];
+
+        const r = await api2.chat.completions.create({
+            model: "meta-llama/llama-4-scout-17b-16e-instruct",
+            messages: mensagens,
+            temperature: 0.9,
+            max_tokens: 1024,
+        });
+
+        return r.choices?.[0]?.message?.content;
+    }
+
+    // ── Função: IA com imagem + memória ────────────────────────────────────────
+    async function perguntarIAComImagem(userId, pergunta, imagens) {
+        const memoria = carregarMemoria();
+        if (!memoria[userId]) memoria[userId] = [];
         const historico = memoria[userId];
 
-        // Monta as mensagens com histórico
+        // Histórico só como texto (modelos de visão não aceitam imagens no histórico)
+        const mensagensHistorico = [];
+        for (const item of historico) {
+            mensagensHistorico.push({ role: "user",      content: item.pergunta });
+            mensagensHistorico.push({ role: "assistant", content: item.resposta });
+        }
+
+        const resposta = await chamarGroqVision(mensagensHistorico, pergunta, imagens);
+
+        // Salva no histórico como texto
+        const perguntaTexto = pergunta
+            ? `[imagem] ${pergunta}`
+            : `[imagem enviada sem texto]`;
+
+        historico.push({ pergunta: perguntaTexto, resposta });
+        if (historico.length > 10) historico.splice(0, historico.length - 10);
+
+        salvarMemoria(memoria);
+        return resposta;
+    }
+
+    // ── Função: IA só texto com memória ───────────────────────────────────────
+    async function perguntarIA(userId, pergunta) {
+        const memoria = carregarMemoria();
+        if (!memoria[userId]) memoria[userId] = [];
+        const historico = memoria[userId];
+
         const mensagens = [
             { role: "system", content: SYSTEM_PROMPT },
         ];
@@ -197,7 +252,6 @@ module.exports = (client) => {
             content: `${pergunta}\n\n(responda em no máximo 1500 caracteres)`,
         });
 
-        // Tenta API 1 primeiro
         let resposta = null;
 
         try {
@@ -211,7 +265,6 @@ module.exports = (client) => {
             console.log("⚠️ API 1 falhou, tentando API 2...", err1?.message);
         }
 
-        // Fallback para API 2
         if (!resposta) {
             try {
                 const r2 = await api2.chat.completions.create({
@@ -226,11 +279,8 @@ module.exports = (client) => {
             }
         }
 
-        // Salva no histórico (máx 10 por usuário)
         historico.push({ pergunta, resposta });
-        if (historico.length > 10) {
-            historico.splice(0, historico.length - 10);
-        }
+        if (historico.length > 10) historico.splice(0, historico.length - 10);
 
         salvarMemoria(memoria);
         return resposta;
@@ -257,25 +307,52 @@ module.exports = (client) => {
         const args    = message.content.split(" ");
         const comando = args[0].toLowerCase();
 
-        // ── !ic — comando principal com memória por usuário ────────────────────
+        // Detecta imagens anexadas
+        const imagensAnexadas = message.attachments
+            .filter((a) => ehImagem(a.name || a.filename || ""))
+            .map((a) => ({
+                url:      a.url,
+                filename: a.name || a.filename || "imagem.jpg",
+            }));
+
+        const temImagem = imagensAnexadas.length > 0;
+
+        // ── Helper: processa e retorna imagens baixadas ────────────────────────
+        async function processarImagens() {
+            return Promise.all(
+                imagensAnexadas.map(async (img) => ({
+                    base64:   await baixarImagemBase64(img.url),
+                    mimeType: detectarMimeType(img.filename),
+                }))
+            );
+        }
+
+        // ── !ic — comando principal com memória ────────────────────────────────
         if (comando === "!ic") {
             const pergunta = args.slice(1).join(" ").trim();
 
-            if (!pergunta) {
+            if (!pergunta && !temImagem) {
                 return message.reply(
                     "mano... você chamou a minha atenção e não perguntou nada?? 💀\n" +
                     "**Exemplo:** `!ic qual a capital do Brasil?`\n" +
-                    "*(dica: é Brasília, mas posso filosofar sobre isso por horas)*"
+                    "Ou manda uma imagem junto com `!ic` pra eu analisar! 👁️"
                 );
             }
 
             try {
                 await message.channel.sendTyping();
-                const resposta = await perguntarIA(message.author.id, pergunta);
+                let resposta;
 
-                if (!resposta) {
-                    return message.reply("❌ nada saiu da minha cabeça. Isso é inédito.");
+                if (temImagem) {
+                    const qtd = imagensAnexadas.length;
+                    await message.channel.send(`🔍 analisando ${qtd > 1 ? qtd + " imagens" : "a imagem"}...`);
+                    const imagens = await processarImagens();
+                    resposta = await perguntarIAComImagem(message.author.id, pergunta, imagens);
+                } else {
+                    resposta = await perguntarIA(message.author.id, pergunta);
                 }
+
+                if (!resposta) return message.reply("❌ nada saiu da minha cabeça. Isso é inédito.");
 
                 await enviarResposta(message, resposta);
 
@@ -287,68 +364,72 @@ module.exports = (client) => {
             }
         }
 
-        // ── !pergunta / !c — comandos legados (sem memória) ──────────────
+        // ── !pergunta / !c — comandos legados ─────────────────────────────────
         if (["!pergunta", "!c"].includes(comando)) {
             const pergunta = args.slice(1).join(" ").trim();
 
-            if (!pergunta) {
+            if (!pergunta && !temImagem) {
                 return message.reply(
                     "❓ Você esqueceu de fazer uma pergunta!\n\n" +
-                    "**Exemplo:** `!pergunta Qual é a capital do Brasil?`\n\n" +
+                    "**Exemplo:** `!pergunta Qual é a capital do Brasil?`\n" +
+                    "Ou manda uma imagem junto! 👁️\n\n" +
                     "*(use `!ic` se quiser que eu lembre das suas perguntas anteriores kkkk)*"
                 );
             }
 
             try {
                 await message.channel.sendTyping();
-
-                // Sem histórico — resposta avulsa
-                const memoria  = {};
-                const mensagens = [
-                    { role: "system", content: SYSTEM_PROMPT },
-                    {
-                        role: "user",
-                        content: `${pergunta}\n\n(responda em no máximo 1500 caracteres)`,
-                    },
-                ];
-
                 let resposta = null;
 
-                try {
-                    const r1 = await api1.chat.completions.create({
-                        model: "meta-llama/llama-3.3-70b-instruct:free",
-                        messages: mensagens,
-                        temperature: 0.9,
-                    });
-                    resposta = r1.choices?.[0]?.message?.content;
-                } catch {
-                    console.log("⚠️ API 1 falhou nos comandos legados, tentando API 2...");
+                if (temImagem) {
+                    // Com imagem mas SEM salvar memória
+                    const qtd = imagensAnexadas.length;
+                    await message.channel.send(`🔍 analisando ${qtd > 1 ? qtd + " imagens" : "a imagem"}...`);
+                    const imagens = await processarImagens();
+                    resposta = await chamarGroqVision([], pergunta, imagens);
+
+                } else {
+                    // Só texto sem memória
+                    const mensagens = [
+                        { role: "system", content: SYSTEM_PROMPT },
+                        {
+                            role: "user",
+                            content: `${pergunta}\n\n(responda em no máximo 1500 caracteres)`,
+                        },
+                    ];
+
+                    try {
+                        const r1 = await api1.chat.completions.create({
+                            model: "meta-llama/llama-3.3-70b-instruct:free",
+                            messages: mensagens,
+                            temperature: 0.9,
+                        });
+                        resposta = r1.choices?.[0]?.message?.content;
+                    } catch {
+                        console.log("⚠️ API 1 falhou, tentando API 2...");
+                    }
+
+                    if (!resposta) {
+                        const r2 = await api2.chat.completions.create({
+                            model: "llama-3.3-70b-versatile",
+                            messages: mensagens,
+                            temperature: 0.9,
+                        });
+                        resposta = r2.choices?.[0]?.message?.content;
+                    }
                 }
 
-                if (!resposta) {
-                    const r2 = await api2.chat.completions.create({
-                        model: "llama-3.3-70b-versatile",
-                        messages: mensagens,
-                        temperature: 0.9,
-                    });
-                    resposta = r2.choices?.[0]?.message?.content;
-                }
-
-                if (!resposta) {
-                    return message.reply("❌ Não consegui gerar uma resposta.");
-                }
+                if (!resposta) return message.reply("❌ Não consegui gerar uma resposta.");
 
                 await enviarResposta(message, resposta);
 
             } catch (err) {
                 console.error("❌ ERRO IA (legado):", err.message || err);
-                return message.reply(
-                    "❌ A IA está indisponível no momento. Tente novamente mais tarde."
-                );
+                return message.reply("❌ A IA está indisponível no momento. Tente novamente mais tarde.");
             }
         }
 
-        // ── !limparmemoria — apaga histórico do usuário ────────────────────────
+        // ── !limparmemoria ─────────────────────────────────────────────────────
         if (comando === "!limparmemoria") {
             const memoria = carregarMemoria();
             if (memoria[message.author.id]) {
@@ -359,15 +440,13 @@ module.exports = (client) => {
                     "*(não sinto nada. ou sinto? filosofia demais pra um bot)*"
                 );
             } else {
-                return message.reply(
-                    "hmm... não tinha nada pra apagar. Você é um fantasma no meu histórico 👻"
-                );
+                return message.reply("hmm... não tinha nada pra apagar. Você é um fantasma no meu histórico 👻");
             }
         }
 
-        // ── !memória — mostra quantas conversas estão salvas ──────────────────
+        // ── !memoria ───────────────────────────────────────────────────────────
         if (comando === "!memoria") {
-            const memoria  = carregarMemoria();
+            const memoria   = carregarMemoria();
             const historico = memoria[message.author.id] || [];
             const total     = historico.length;
 
@@ -379,7 +458,9 @@ module.exports = (client) => {
             }
 
             const resumo = historico
-                .map((item, i) => `**${i + 1}.** ${item.pergunta.slice(0, 60)}${item.pergunta.length > 60 ? "..." : ""}`)
+                .map((item, i) =>
+                    `**${i + 1}.** ${item.pergunta.slice(0, 60)}${item.pergunta.length > 60 ? "..." : ""}`
+                )
                 .join("\n");
 
             return message.reply(
@@ -388,42 +469,49 @@ module.exports = (client) => {
             );
         }
 
-        // ── !ajudaia — embed de ajuda ──────────────────────────────────────────
+        // ── !ajudaia ───────────────────────────────────────────────────────────
         if (comando === "!ajudaia") {
             const embed = new EmbedBuilder()
                 .setTitle("🤖 Comandos da IA Caótica")
                 .setColor(0xff6b35)
-                .setDescription(
-                    "oi, sou uma IA com problemas de foco mas muito boa vontade (às vezes)"
-                )
+                .setDescription("oi, sou uma IA com problemas de foco mas muito boa vontade (às vezes)")
                 .addFields(
                     {
                         name: "🧠 !ic [pergunta]",
                         value:
                             "Faz uma pergunta COM memória! Lembro das suas últimas 10 conversas.\n" +
-                            "`!ic qual o sentido da vida?`",
+                            "Aceita imagens! Só anexar junto com o comando.\n" +
+                            "`!ic qual o sentido da vida?`\n" +
+                            "`!ic quantas partes estão pintadas?` + 📎 imagem",
+                    },
+                    {
+                        name: "👁️ Análise de Imagem",
+                        value:
+                            "Mande uma imagem com `!ic` ou `!c` e eu analiso tudo:\n" +
+                            "textos, objetos, cores, formas, questões matemáticas!\n" +
+                            "Modelo: **Llama 4 Scout Vision** (Groq)",
                     },
                     {
                         name: "❓ !pergunta / !c [pergunta]",
                         value:
-                            "Pergunta avulsa, SEM memória. Cada vez que uso como se fosse a primeira.\n" +
+                            "Pergunta avulsa SEM memória. Também aceita imagens!\n" +
                             "`!c o que é JavaScript?`",
                     },
                     {
                         name: "🧹 !limparmemoria",
-                        value: "Apaga TODO o histórico que tenho de você. Recomeço total.",
+                        value: "Apaga TODO o histórico que tenho de você.",
                     },
                     {
                         name: "📋 !memoria",
-                        value: "Mostra quantas e quais conversas estão salvas na minha cabeça.",
+                        value: "Mostra quantas e quais conversas estão salvas.",
                     },
                     {
                         name: "❓ !ajudaia",
-                        value: "Mostra essa mensagem aqui que você já tá vendo.",
+                        value: "Mostra essa mensagem.",
                     }
                 )
                 .setFooter({
-                    text: "Powered by LiteRouter + Groq • personalidade: caos puro",
+                    text: "Powered by LiteRouter + Groq • visão: Llama 4 Scout • personalidade: caos puro",
                 });
 
             await message.reply({ embeds: [embed] });
