@@ -4,7 +4,14 @@ const chromium = require("@sparticuz/chromium");
 
 async function getBrowser() {
   return puppeteer.launch({
-    args: [...chromium.args, "--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process"],
+    args: [
+      ...chromium.args,
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--single-process"
+    ],
     defaultViewport: chromium.defaultViewport,
     executablePath: await chromium.executablePath(),
     headless: chromium.headless
@@ -19,47 +26,21 @@ const ANSWER_SELECTORS = [
   "div[data-functional-selector='answer-3']",
 ];
 
-// Busca o UUID do quiz pelo PIN via API do Kahoot
-async function getQuizUuidByPin(pin) {
-  const res = await fetch(`https://kahoot.it/reserve/session/${pin}/?${Date.now()}`);
-  if (!res.ok) throw new Error("PIN inválido ou sala não encontrada.");
-  const data = await res.json();
-  return data.challenge; // contém o token/quiz info
-}
-
-// Pega as perguntas do quiz pela API pública
-async function getQuizQuestions(pin) {
-  // Primeiro pega o token da sessão
-  const sessionRes = await fetch(`https://kahoot.it/reserve/session/${pin}/?${Date.now()}`);
-  if (!sessionRes.ok) throw new Error("PIN inválido ou sala não encontrada.");
-  const sessionData = await sessionRes.json();
-
-  const quizId = sessionData.quizId;
-  if (!quizId) throw new Error("Não foi possível obter o ID do quiz.");
-
-  // Busca os dados do quiz
-  const quizRes = await fetch(`https://create.kahoot.it/rest/kahoots/${quizId}`);
-  if (!quizRes.ok) throw new Error("Não foi possível carregar as perguntas do quiz.");
-  const quizData = await quizRes.json();
-
-  return quizData.questions || [];
-}
-
-async function loopPerguntas(page, browser, channel, questions) {
-  let perguntaIndex = 0;
+async function loopPerguntas(page, browser, channel) {
   let msgAtual = null;
   let coletorAtual = null;
 
-  while (perguntaIndex < questions.length) {
+  while (true) {
     try {
-      const q = questions[perguntaIndex];
+      // Aguarda pergunta ou fim de jogo
+      await page.waitForFunction(() => {
+        return document.querySelector("[data-functional-selector='answer-0']") !== null
+            || document.querySelector("[data-functional-selector='end-screen']") !== null
+            || document.body.innerText.includes("podium")
+            || document.body.innerText.includes("Game over");
+      }, { timeout: 60000 });
 
-      // Aguarda aparecer os botões de resposta na tela do jogador
-      await page.waitForFunction((sels) => {
-        return sels.some(sel => document.querySelector(sel) !== null);
-      }, { timeout: 90000 }, ANSWER_SELECTORS).catch(() => {});
-
-      // Checa se o jogo acabou
+      // Checa fim de jogo
       const fimDeJogo = await page.evaluate(() => {
         return document.querySelector("[data-functional-selector='end-screen']") !== null
             || document.body.innerText.includes("Game over")
@@ -76,21 +57,52 @@ async function loopPerguntas(page, browser, channel, questions) {
         break;
       }
 
-      // Pega as respostas disponíveis da API (já temos no `q`)
-      const respostasValidas = (q.choices || [])
-        .map((choice, i) => ({ texto: choice.answer, index: i }))
+      // Pega a pergunta da tela do apresentador via Puppeteer
+      const pergunta = await page.evaluate(() => {
+        // Tenta vários seletores possíveis para o título da pergunta
+        const sels = [
+          "[data-functional-selector='question-title']",
+          "[data-functional-selector='block-title']",
+          ".question-title",
+          "h1", "h2"
+        ];
+        for (const sel of sels) {
+          const el = document.querySelector(sel);
+          if (el && el.innerText.trim()) return el.innerText.trim();
+        }
+        return "❓ Pergunta não identificada";
+      });
+
+      // Pega o texto das respostas da tela
+      const respostas = await page.evaluate((sels) => {
+        return sels.map(sel => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          // Tenta pegar só o texto, ignorando ícones
+          const spans = el.querySelectorAll("span");
+          for (const span of spans) {
+            const t = span.innerText.trim();
+            if (t) return t;
+          }
+          return el.innerText.trim() || null;
+        });
+      }, ANSWER_SELECTORS);
+
+      const respostasValidas = respostas
+        .map((r, i) => ({ texto: r, index: i }))
         .filter(r => r.texto);
 
       if (respostasValidas.length === 0) {
-        perguntaIndex++;
+        await new Promise(r => setTimeout(r, 2000));
         continue;
       }
 
+      // Monta embed
       const embed = new EmbedBuilder()
-        .setTitle(`❓ Pergunta ${perguntaIndex + 1} de ${questions.length}`)
-        .setDescription(`**${q.question}**`)
+        .setTitle("❓ Nova Pergunta!")
+        .setDescription(`**${pergunta}**`)
         .setColor(0x46178f)
-        .setFooter({ text: "Escolha sua resposta!" });
+        .setFooter({ text: "Escolha sua resposta abaixo!" });
 
       const row = new ActionRowBuilder().addComponents(
         respostasValidas.map(r =>
@@ -128,7 +140,7 @@ async function loopPerguntas(page, browser, channel, questions) {
                 .setColor(0x57f287)],
               components: []
             });
-          } catch (err) {
+          } catch {
             await btnInteraction.update({
               embeds: [new EmbedBuilder()
                 .setTitle("⚠️ Não consegui clicar")
@@ -154,20 +166,19 @@ async function loopPerguntas(page, browser, channel, questions) {
         });
       });
 
-      // Aguarda a pergunta sumir da tela do jogador
+      // Aguarda os botões de resposta sumirem (próxima fase)
       await page.waitForFunction((sels) => {
         return sels.every(sel => document.querySelector(sel) === null);
       }, { timeout: 60000 }, ANSWER_SELECTORS).catch(() => {});
 
       await new Promise(r => setTimeout(r, 2000));
-      perguntaIndex++;
 
     } catch (err) {
       if (err.message?.includes("timeout")) {
         await channel.send({
           embeds: [new EmbedBuilder()
             .setTitle("⏳ Sem atividade")
-            .setDescription("Não detectei atividade por muito tempo. O jogo pode ter encerrado.")
+            .setDescription("Não detectei nova pergunta por 60 segundos. O jogo pode ter encerrado.")
             .setColor(0xfee75c)]
         });
         break;
@@ -259,14 +270,11 @@ function setup(client) {
 
       let browser;
       try {
-        // Busca perguntas via API antes de abrir o browser
-        await onStep(1, "⏳ Buscando perguntas do quiz...");
-        const questions = await getQuizQuestions(pin);
-        await onStep(1, `✅ ${questions.length} perguntas carregadas!`);
-
         browser = await getBrowser();
         const page = await browser.newPage();
         await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
+
+        await onStep(1, "✅ Navegador aberto");
 
         await onStep(2, "⏳ Acessando kahoot.it...");
         await page.goto("https://kahoot.it", { waitUntil: "networkidle2", timeout: 30000 });
@@ -324,17 +332,18 @@ function setup(client) {
               || document.body.innerText.includes("You're in!")
               || document.body.innerText.includes("waiting");
         }, { timeout: 20000 });
-        await onStep(5, "✅ Entrou na sala! As perguntas vão aparecer aqui no ticket.");
+        await onStep(5, "✅ Entrou na sala! As perguntas vão aparecer aqui no canal.");
 
+        // Avisa no canal do ticket
         await interaction.channel.send({
           embeds: [new EmbedBuilder()
             .setTitle("🎮 Kahoot conectado!")
-            .setDescription(`<@${interaction.user.id}> está na sala como **${nickname}**.\nQuando o jogo começar, as perguntas aparecerão aqui!`)
+            .setDescription(`<@${interaction.user.id}> entrou como **${nickname}**.\nQuando o jogo começar, as perguntas aparecerão aqui!`)
             .setColor(0x46178f)]
         });
 
-        // Loop de perguntas no canal do ticket
-        loopPerguntas(page, browser, interaction.channel, questions).catch(async (err) => {
+        // Loop de perguntas no canal do ticket (sem DM)
+        loopPerguntas(page, browser, interaction.channel).catch(async (err) => {
           await interaction.channel.send({
             embeds: [new EmbedBuilder()
               .setTitle("❌ Erro no jogo")
