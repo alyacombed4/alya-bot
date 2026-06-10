@@ -1,168 +1,214 @@
-const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder } = require("discord.js");
-const puppeteer = require("puppeteer-core");
-const chromium = require("@sparticuz/chromium");
+const { Client, GatewayIntentBits } = require("discord.js");
+const fs = require("fs");
+const path = require("path");
+const https = require("https");
+const {
+  backupServer,
+  restoreServer,
+  zipBackup,
+  splitFile,
+} = require("./systems/backupRestore");
 
-async function getBrowser() {
-  return puppeteer.launch({
-    args: [
-      ...chromium.args,
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-gpu",
-      "--single-process"
-    ],
-    defaultViewport: chromium.defaultViewport,
-    executablePath: await chromium.executablePath(),
-    headless: chromium.headless
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates
+  ]
+});
+
+const OWNER_ID = "1372615579407618209";
+const BACKUP_CHANNEL_ID = "1479261311635554435";
+const ZIP_URL = "https://github.com/alyacombed2/alya-bot1/archive/refs/heads/main.zip";
+const ZIP_FILE_NAME = "alya-bot-main.zip";
+
+require("./systems/main")(client);
+require("./systems/gfzin")(client);
+require("./systems/coco")(client);
+require("./systems/comandos")(client);
+require("./systems/uno")(client);
+require("./systems/ia")(client);
+require("./systems/Kahoot").setup(client);
+
+client.once("clientReady", () => {
+  console.log(`✅ Bot online como ${client.user.tag}`);
+});
+
+function baixarArquivo(url, destino) {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(destino);
+
+    https.get(url, (response) => {
+      if (
+        response.statusCode >= 300 &&
+        response.statusCode < 400 &&
+        response.headers.location
+      ) {
+        file.close();
+        fs.unlink(destino, () => {});
+        return baixarArquivo(response.headers.location, destino)
+          .then(resolve)
+          .catch(reject);
+      }
+
+      if (response.statusCode !== 200) {
+        file.close();
+        fs.unlink(destino, () => {});
+        return reject(new Error(`Falha ao baixar arquivo. Status: ${response.statusCode}`));
+      }
+
+      response.pipe(file);
+      file.on("finish", () => { file.close(resolve); });
+    }).on("error", (err) => {
+      file.close();
+      fs.unlink(destino, () => {});
+      reject(err);
+    });
   });
 }
 
-async function joinKahoot(pin, nickname, onStep) {
-  pin = pin.replace(/\s+/g, "");
-  let browser;
-
+async function enviarZipAtualizado() {
   try {
-    await onStep(1, "⏳ Abrindo navegador...");
-    browser = await getBrowser();
-    const page = await browser.newPage();
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
-    await onStep(1, "✅ Navegador aberto");
+    const canal = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+    if (!canal) { console.log("❌ Canal de backup não encontrado."); return false; }
 
-    await onStep(2, "⏳ Acessando kahoot.it...");
-    await page.goto("https://kahoot.it", { waitUntil: "networkidle2", timeout: 20000 });
-    await onStep(2, "✅ Site carregado");
+    const filePath = path.join(__dirname, ZIP_FILE_NAME);
+    console.log("📦 Baixando ZIP atualizado do GitHub...");
+    await baixarArquivo(ZIP_URL, filePath);
 
-    await onStep(3, "⏳ Inserindo PIN...");
-    await page.waitForSelector("input[data-functional-selector='game-input-text']", { timeout: 10000 });
-    await page.click("input[data-functional-selector='game-input-text']");
-    await page.type("input[data-functional-selector='game-input-text']", pin, { delay: 100 });
-    await page.waitForSelector("button[data-functional-selector='join-game-pin']", { timeout: 5000 });
-    await page.click("button[data-functional-selector='join-game-pin']");
-    await onStep(3, "✅ PIN inserido");
+    await canal.send({
+      content: "📦 **script gfzin.js atualizado pasta do bot atualizada**",
+      files: [filePath]
+    });
 
-    await onStep(4, "⏳ Inserindo nickname...");
-    await page.waitForSelector("input[data-functional-selector='nickname-input']", { timeout: 10000 });
-    await new Promise(r => setTimeout(r, 1000));
-    await page.click("input[data-functional-selector='nickname-input']");
-    await page.type("input[data-functional-selector='nickname-input']", nickname, { delay: 120 });
-    await new Promise(r => setTimeout(r, 500));
-    await page.waitForSelector("button[data-functional-selector='join-button-username']", { timeout: 5000 });
-    await page.click("button[data-functional-selector='join-button-username']");
-    await onStep(4, "✅ Nickname inserido");
-
-    await onStep(5, "⏳ Aguardando entrar na sala...");
-    await page.waitForFunction(() => {
-      return document.querySelector("[data-functional-selector='waiting-screen']") !== null
-          || document.querySelector("[data-functional-selector='lobby']") !== null
-          || document.body.innerText.includes("You're in!");
-    }, { timeout: 15000 });
-    await onStep(5, "✅ Entrou na sala! Aguardando o jogo começar...");
-
-    await new Promise(r => setTimeout(r, 300000));
-  } finally {
-    if (browser) await browser.close();
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    console.log("✅ ZIP atualizado enviado com sucesso.");
+    return true;
+  } catch (err) {
+    console.log("❌ Erro ao enviar ZIP atualizado:", err.message);
+    return false;
   }
 }
 
-function setup(client) {
-  client.on("messageCreate", async (msg) => {
-    if (msg.author.bot) return;
-    if (msg.content === "!kahootmsg") {
-      const embed = new EmbedBuilder()
-        .setTitle("🎮 Kahoot Bot")
-        .setDescription("Clique no botão abaixo para entrar em uma sala do Kahoot!")
-        .setColor(0x46178f)
-        .setFooter({ text: "Kahoot Bot • Controla o site de verdade" });
+async function enviarArquivosBackup(parts, motivo = "Backup") {
+  let dmEnviada = false;
+  let canalEnviado = false;
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder()
-          .setCustomId("kahoot_join")
-          .setLabel("🚀 Entrar na Sala")
-          .setStyle(ButtonStyle.Primary)
-      );
-
-      await msg.channel.send({ embeds: [embed], components: [row] });
+  try {
+    const user = await client.users.fetch(OWNER_ID);
+    const dm = await user.createDM();
+    await dm.send(`⚠️ ${motivo}\n📦 Enviando backup automático...`);
+    for (let i = 0; i < parts.length; i++) {
+      await dm.send({ content: `📦 Parte ${i + 1}/${parts.length}`, files: [parts[i]] });
+      await new Promise(res => setTimeout(res, 1500));
     }
-  });
+    await dm.send("✅ Backup enviado com sucesso!");
+    dmEnviada = true;
+  } catch (err) { console.log("❌ Erro ao enviar na DM:", err.message); }
 
-  client.on("interactionCreate", async (interaction) => {
-    if (interaction.isButton() && interaction.customId === "kahoot_join") {
-      const modal = new ModalBuilder()
-        .setCustomId("kahoot_modal")
-        .setTitle("Entrar no Kahoot");
-
-      modal.addComponents(
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("pin")
-            .setLabel("PIN da Sala")
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder("Ex: 355 2907")
-            .setMinLength(6)
-            .setMaxLength(9)
-            .setRequired(true)
-        ),
-        new ActionRowBuilder().addComponents(
-          new TextInputBuilder()
-            .setCustomId("nickname")
-            .setLabel("Seu Nickname")
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder("Ex: Player1")
-            .setMinLength(1)
-            .setMaxLength(15)
-            .setRequired(true)
-        )
-      );
-
-      await interaction.showModal(modal);
+  try {
+    const canal = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+    if (canal) {
+      await canal.send(`⚠️ ${motivo}\n📦 Enviando backup automático...`);
+      for (let i = 0; i < parts.length; i++) {
+        await canal.send({ content: `📦 Parte ${i + 1}/${parts.length}`, files: [parts[i]] });
+        await new Promise(res => setTimeout(res, 1500));
+      }
+      await canal.send("✅ Backup enviado com sucesso!");
+      canalEnviado = true;
     }
+  } catch (err) { console.log("❌ Erro ao enviar no canal:", err.message); }
 
-    if (interaction.isModalSubmit() && interaction.customId === "kahoot_modal") {
-      const pin = interaction.fields.getTextInputValue("pin").trim();
-      const nickname = interaction.fields.getTextInputValue("nickname").trim();
-
-      await interaction.deferReply({ ephemeral: true });
-
-      const passos = {
-        1: "⬜ Abrindo navegador...",
-        2: "⬜ Acessando kahoot.it...",
-        3: "⬜ Inserindo PIN...",
-        4: "⬜ Inserindo nickname...",
-        5: "⬜ Entrando na sala..."
-      };
-
-      function buildEmbed(extra = "") {
-        return new EmbedBuilder()
-          .setTitle("🎮 Entrando no Kahoot...")
-          .setDescription(
-            Object.values(passos).join("\n") +
-            (extra ? `\n\n${extra}` : "")
-          )
-          .setColor(0x46178f);
-      }
-
-      await interaction.editReply({ embeds: [buildEmbed()] });
-
-      async function onStep(num, texto) {
-        passos[num] = texto;
-        await interaction.editReply({ embeds: [buildEmbed()] });
-        await new Promise(r => setTimeout(r, 800));
-      }
-
-      try {
-        await joinKahoot(pin, nickname, onStep);
-      } catch (err) {
-        await interaction.editReply({
-          embeds: [new EmbedBuilder()
-            .setTitle("❌ Erro ao entrar")
-            .setDescription(`${err.message || err}`)
-            .setColor(0xed4245)
-            .setFooter({ text: "Verifique o PIN e tente novamente" })]
-        });
-      }
-    }
-  });
+  if (!dmEnviada && !canalEnviado) console.log("❌ Não consegui enviar backup nem na DM nem no canal.");
 }
 
-module.exports = { setup };
+async function limparPartesTemporarias(parts) {
+  try {
+    for (const file of parts) {
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    }
+  } catch (err) { console.log("⚠️ Erro ao limpar arquivos temporários:", err.message); }
+}
+
+async function enviarBackupAutomatico(motivo = "Encerramento") {
+  try {
+    const guild = client.guilds.cache.first();
+    if (!guild) return;
+    console.log(`📦 Backup automático iniciado (${motivo})`);
+    await backupServer(guild);
+    const zipPath = await zipBackup(guild.id);
+    const parts = splitFile(zipPath);
+    await enviarArquivosBackup(parts, `⚠️ Bot finalizado (${motivo})`);
+    await limparPartesTemporarias(parts);
+  } catch (err) { console.log("❌ Erro backup auto:", err.message); }
+}
+
+process.on("SIGINT", async () => { console.log("🛑 SIGINT detectado"); await enviarBackupAutomatico("SIGINT"); process.exit(0); });
+process.on("SIGTERM", async () => { console.log("🛑 SIGTERM detectado"); await enviarBackupAutomatico("SIGTERM (Railway)"); process.exit(0); });
+process.on("uncaughtException", async (err) => { console.log("💥 ERRO:", err); await enviarBackupAutomatico("Erro crítico"); process.exit(1); });
+process.on("unhandledRejection", async (reason) => { console.log("💥 PROMISE ERROR:", reason); await enviarBackupAutomatico("Promise rejeitada"); });
+
+setInterval(async () => {
+  try {
+    const guild = client.guilds.cache.first();
+    if (!guild) return;
+    console.log("💾 Backup automático periódico...");
+    await backupServer(guild);
+  } catch (err) { console.log("❌ Erro auto backup:", err.message); }
+}, 1000 * 60 * 30);
+
+setInterval(async () => {
+  try {
+    const canal = await client.channels.fetch(BACKUP_CHANNEL_ID).catch(() => null);
+    if (!canal) return;
+    await canal.send("📡 **Container Railway online**");
+    console.log("📡 Mensagem de status do container enviada.");
+  } catch (err) { console.log("❌ Erro ao enviar status do container:", err.message); }
+}, 1000 * 60 * 60 * 24);
+
+client.on("messageCreate", async (message) => {
+  if (!message.guild || message.author.bot) return;
+  if (message.author.id !== OWNER_ID) return;
+
+  if (message.content === "!backup") {
+    await message.reply("📦 Fazendo backup...");
+    try {
+      await backupServer(message.guild);
+      const zipPath = await zipBackup(message.guild.id);
+      const parts = splitFile(zipPath);
+      await message.reply(`📤 Enviando ${parts.length} partes na DM e no canal...`);
+      await enviarArquivosBackup(parts, "📦 Backup manual solicitado");
+      await limparPartesTemporarias(parts);
+      await message.reply("✅ Backup enviado!");
+    } catch (err) {
+      console.log("❌ ERRO BACKUP MANUAL:", err.message);
+      await message.reply("❌ Não consegui enviar o backup!");
+    }
+  }
+
+  if (message.content === "!restore") {
+    await message.reply("♻️ Restaurando servidor...");
+    try {
+      await restoreServer(message.guild);
+      await message.reply("✅ Restore concluído!");
+    } catch (err) {
+      console.log("❌ ERRO RESTORE:", err.message);
+      await message.reply("❌ Erro ao restaurar o servidor.");
+    }
+  }
+
+  if (message.content === "!att") {
+    await message.reply("📦 Baixando e enviando atualização do bot...");
+    const enviado = await enviarZipAtualizado();
+    if (enviado) {
+      await message.reply("✅ ZIP atualizado enviado no canal!");
+    } else {
+      await message.reply("❌ Não consegui enviar o ZIP atualizado.");
+    }
+  }
+});
+
+client.login(process.env.TOKEN);
