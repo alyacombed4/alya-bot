@@ -2,17 +2,53 @@ const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBui
 const WebSocket = require("ws");
 const https = require("https");
 
+function solveChallenge(challenge) {
+  const match = challenge.match(/\d+/g);
+  let result = 0;
+  if (match) match.forEach(n => result += parseInt(n));
+  return result % 256;
+}
+
+function decodeToken(token, offset) {
+  const buf = Buffer.from(token, "base64").toString("utf8");
+  const off = offset.toString();
+  return buf.split("").map((c, i) => {
+    return String.fromCharCode(c.charCodeAt(0) ^ off.charCodeAt(i % off.length));
+  }).join("");
+}
+
 async function getToken(pin) {
   return new Promise((resolve, reject) => {
-    https.get(`https://kahoot.it/reserve/session/${pin}/`, (res) => {
-      const token = res.headers["x-kahoot-session-token"];
-      res.on("data", () => {});
-      res.on("end", () => (token ? resolve(token) : reject("PIN inválido")));
+    const options = {
+      hostname: "kahoot.it",
+      path: `/reserve/session/${pin}/`,
+      headers: {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
+      }
+    };
+
+    https.get(options, (res) => {
+      let body = "";
+      const rawToken = res.headers["x-kahoot-session-token"];
+
+      res.on("data", (chunk) => body += chunk);
+      res.on("end", () => {
+        try {
+          const json = JSON.parse(body);
+          const solved = solveChallenge(json.challenge);
+          const token = decodeToken(rawToken, solved);
+          resolve(token);
+        } catch (e) {
+          reject("Erro ao processar token: " + e);
+        }
+      });
     }).on("error", reject);
   });
 }
 
 async function joinKahoot(pin, nickname) {
+  pin = pin.replace(/\s/g, "");
   const token = await getToken(pin);
   const ws = new WebSocket(`wss://kahoot.it/cometd/${pin}/${token}`);
 
@@ -52,12 +88,11 @@ async function joinKahoot(pin, nickname) {
       }
     });
 
-    ws.on("error", reject);
+    ws.on("error", (err) => reject(err.message));
   });
 }
 
 function setup(client) {
-  // !kahootmsg
   client.on("messageCreate", async (msg) => {
     if (msg.content === "!kahootmsg") {
       const embed = new EmbedBuilder()
@@ -77,7 +112,6 @@ function setup(client) {
     }
   });
 
-  // Botão + Modal
   client.on("interactionCreate", async (interaction) => {
     if (interaction.isButton() && interaction.customId === "kahoot_join") {
       const modal = new ModalBuilder()
@@ -90,7 +124,7 @@ function setup(client) {
             .setCustomId("pin")
             .setLabel("PIN da Sala")
             .setStyle(TextInputStyle.Short)
-            .setPlaceholder("Ex: 123456")
+            .setPlaceholder("Ex: 363 5802")
             .setRequired(true)
         ),
         new ActionRowBuilder().addComponents(
