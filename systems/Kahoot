@@ -1,614 +1,136 @@
-// src/commands/index.js
-// Todos os comandos do bot
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder } = require("discord.js");
+const WebSocket = require("ws");
+const https = require("https");
 
-const { AttachmentBuilder, EmbedBuilder } = require('discord.js');
-const { db, queries, addFigurinhaToUser, getPacotesUser, addPacotesUser, getPercentualAlbum, executarTroca, ensureUser } = require('../../database/db');
-const { abrirPacote } = require('../utils/pacotes');
-const { gerarImagemPacote, gerarImagemFigurinha, gerarPaginaAlbum, RARIDADE_CONFIG } = require('../canvas/gerarFigurinha');
-
-const ALLOWED_CHANNEL = process.env.ALLOWED_CHANNEL_ID || '1487213672362278942';
-const PRECO_PACOTE = parseInt(process.env.ECONOMIA_PRECO_PACOTE || '500');
-
-// ─── HELPER: verificar canal ──────────────────────────────────────────────────
-function checkCanal(message) {
-  if (message.channel.id !== ALLOWED_CHANNEL) {
-    message.reply(`❌ Este comando só funciona em <#${ALLOWED_CHANNEL}>!`);
-    return false;
-  }
-  return true;
+async function getToken(pin) {
+  return new Promise((resolve, reject) => {
+    https.get(`https://kahoot.it/reserve/session/${pin}/`, (res) => {
+      const token = res.headers["x-kahoot-session-token"];
+      res.on("data", () => {});
+      res.on("end", () => (token ? resolve(token) : reject("PIN inválido")));
+    }).on("error", reject);
+  });
 }
 
-// ─── HELPER: embed padrão ────────────────────────────────────────────────────
-function embed(titulo, desc, cor = '#e53935') {
-  return new EmbedBuilder()
-    .setTitle(titulo)
-    .setDescription(desc)
-    .setColor(cor)
-    .setTimestamp()
-    .setFooter({ text: '⚽ Álbum da Copa 2022' });
-}
+async function joinKahoot(pin, nickname) {
+  const token = await getToken(pin);
+  const ws = new WebSocket(`wss://kahoot.it/cometd/${pin}/${token}`);
 
-// ─── HELPER: raridade emoji ───────────────────────────────────────────────────
-const RARIDADE_EMOJI = {
-  comum: '⚪', rara: '🔵', epica: '🟣', lendaria: '🟠', cromada: '⭐'
-};
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !abrirpacote
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdAbrirPacote(message) {
-  if (!checkCanal(message)) return;
-
-  const userId = message.author.id;
-  ensureUser(userId);
-
-  const pacotesData = getPacotesUser(userId);
-  if (pacotesData.quantidade <= 0) {
-    return message.reply(embed(
-      '❌ Sem Pacotes!',
-      `Você não tem pacotes disponíveis!\n\n**Como conseguir pacotes:**\n• 🔊 Fique em call\n• 🎮 Participe de minigames\n• 🛒 Use \`!comprarpacote\`\n• 🎁 Participe de eventos`,
-      '#c62828'
-    ));
-  }
-
-  const msg = await message.reply({ embeds: [embed('⏳ Abrindo pacote...', 'Gerando suas figurinhas...')] });
-
-  try {
-    const figurinhas = abrirPacote(userId);
-    if (!figurinhas) {
-      return msg.edit({ embeds: [embed('❌ Erro', 'Não foi possível abrir o pacote. Tente novamente.')] });
-    }
-
-    const imgBuffer = gerarImagemPacote(figurinhas);
-    const attachment = new AttachmentBuilder(imgBuffer, { name: 'pacote.png' });
-
-    // Verificar novidades
-    const novas = figurinhas.filter(f => {
-      const col = queries.getUserFigurinha.get(userId, f.id);
-      return col && col.quantidade === 1;
+  return new Promise((resolve, reject) => {
+    ws.on("open", () => {
+      ws.send(JSON.stringify([{
+        channel: "/meta/handshake",
+        version: "1.0",
+        minimumVersion: "1.0",
+        supportedConnectionTypes: ["websocket"],
+        id: "1"
+      }]));
     });
 
-    const destaques = figurinhas
-      .filter(f => ['lendaria', 'cromada', 'epica'].includes(f.raridade))
-      .map(f => `${RARIDADE_EMOJI[f.raridade]} **${f.nome}** (${f.pais}) — ${RARIDADE_CONFIG[f.raridade].label}`)
-      .join('\n') || 'Nenhum destaque desta vez...';
+    ws.on("message", (data) => {
+      const msg = JSON.parse(data);
+      if (msg[0]?.channel === "/meta/handshake") {
+        const clientId = msg[0].clientId;
 
-    const pacotesRestantes = getPacotesUser(userId);
+        ws.send(JSON.stringify([{
+          channel: "/service/controller",
+          clientId,
+          data: { type: "login", gameid: pin, name: nickname, participantUserId: null },
+          id: "2"
+        }]));
 
-    const e = new EmbedBuilder()
-      .setTitle('📦 Pacote Aberto!')
-      .setDescription(`**Destaques:**\n${destaques}\n\n✨ **${novas.length} nova(s)** figurinha(s) adicionada(s) à coleção!`)
-      .addFields(
-        { name: '📦 Pacotes Restantes', value: String(pacotesRestantes.quantidade), inline: true },
-        { name: '📊 Figurinhas no Total', value: String(figurinhas.length), inline: true },
-        { name: '🆕 Novas', value: String(novas.length), inline: true },
-      )
-      .setImage('attachment://pacote.png')
-      .setColor('#e53935')
-      .setTimestamp()
-      .setFooter({ text: `⚽ Álbum da Copa 2022 • Use !album para ver sua coleção` });
+        setInterval(() => {
+          ws.send(JSON.stringify([{
+            channel: "/meta/connect",
+            clientId,
+            connectionType: "websocket",
+            id: "3"
+          }]));
+        }, 5000);
 
-    await msg.edit({ embeds: [e], files: [attachment] });
-  } catch (err) {
-    console.error('Erro ao abrir pacote:', err);
-    await msg.edit({ embeds: [embed('❌ Erro interno', 'Ocorreu um erro ao gerar as figurinhas.')] });
-  }
+        resolve();
+      }
+    });
+
+    ws.on("error", reject);
+  });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !figurinha <id>
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdFigurinha(message, args) {
-  if (!checkCanal(message)) return;
-
-  const id = parseInt(args[0]);
-  if (isNaN(id) || id < 1) {
-    return message.reply(embed('❌ ID inválido', 'Use: `!figurinha <id>`\nEx: `!figurinha 42`'));
-  }
-
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) {
-    return message.reply(embed('❌ Figurinha não encontrada', `A figurinha #${id} não existe. O álbum tem IDs de 1 a 980.`));
-  }
-
-  const userId = message.author.id;
-  const naColecao = queries.getUserFigurinha.get(userId, id);
-  const cfg = RARIDADE_CONFIG[fig.raridade] || RARIDADE_CONFIG.comum;
-
-  const msg = await message.reply({ embeds: [embed('⏳', 'Gerando figurinha...')] });
-
-  try {
-    const imgBuffer = gerarImagemFigurinha(fig);
-    const attachment = new AttachmentBuilder(imgBuffer, { name: `figurinha_${id}.png` });
-
-    const e = new EmbedBuilder()
-      .setTitle(`${RARIDADE_EMOJI[fig.raridade]} ${fig.nome}`)
-      .addFields(
-        { name: '🌍 País', value: fig.pais, inline: true },
-        { name: '🎯 Posição', value: fig.posicao, inline: true },
-        { name: '⭐ Overall', value: String(fig.overall), inline: true },
-        { name: '💎 Raridade', value: cfg.label, inline: true },
-        { name: '🏆 Grupo', value: fig.grupo || 'N/A', inline: true },
-        { name: '📁 Tipo', value: (fig.tipo || 'jogador').toUpperCase(), inline: true },
-        { name: '📦 Na sua coleção', value: naColecao ? `✅ Você tem **${naColecao.quantidade}x** desta figurinha` : '❌ Você não tem esta figurinha', inline: false },
-      )
-      .setImage(`attachment://figurinha_${id}.png`)
-      .setColor(fig.cor_primaria || '#e53935')
-      .setTimestamp()
-      .setFooter({ text: `Figurinha #${String(id).padStart(4, '0')} • ⚽ Álbum da Copa 2022` });
-
-    await msg.edit({ embeds: [e], files: [attachment] });
-  } catch (err) {
-    console.error('Erro figurinha:', err);
-    await msg.edit({ embeds: [embed('❌ Erro', 'Erro ao gerar imagem da figurinha.')] });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !colecao [pagina]
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdColecao(message, args) {
-  if (!checkCanal(message)) return;
-
-  const userId = message.author.id;
-  ensureUser(userId);
-
-  const colecao = queries.getColecaoUser.all(userId);
-  if (colecao.length === 0) {
-    return message.reply(embed('📂 Coleção Vazia', 'Você ainda não tem figurinhas!\nAbra pacotes com `!abrirpacote`'));
-  }
-
-  const { unicas, total, percentual } = getPercentualAlbum(userId);
-  const pagina = Math.max(1, parseInt(args[0]) || 1);
-  const itensPorPagina = 20;
-  const totalPaginas = Math.ceil(total / itensPorPagina);
-
-  const allFigurinhas = queries.getAllFigurinhas.all();
-  const colecaoMap = new Map(colecao.map(c => [c.figurinha_id, c]));
-
-  const paginaFigs = allFigurinhas
-    .slice((pagina - 1) * itensPorPagina, pagina * itensPorPagina)
-    .map(f => ({ fig: f, tem: colecaoMap.has(f.id) }));
-
-  const msg = await message.reply({ embeds: [embed('⏳', `Gerando página ${pagina}...`)] });
-
-  try {
-    const imgBuffer = gerarPaginaAlbum(paginaFigs, pagina, totalPaginas, message.author);
-    const attachment = new AttachmentBuilder(imgBuffer, { name: 'colecao.png' });
-
-    // Resumo por raridade
-    const porRaridade = colecao.reduce((acc, f) => {
-      acc[f.raridade] = (acc[f.raridade] || 0) + 1;
-      return acc;
-    }, {});
-
-    const resumo = Object.entries(porRaridade)
-      .map(([r, n]) => `${RARIDADE_EMOJI[r]} ${n}`)
-      .join(' • ');
-
-    const e = new EmbedBuilder()
-      .setTitle(`📖 Coleção de ${message.author.username}`)
-      .setDescription(`**Progresso:** ${unicas}/${total} figurinhas únicas (${percentual}%)\n\n${resumo}`)
-      .addFields(
-        { name: '📄 Página', value: `${pagina}/${totalPaginas}`, inline: true },
-        { name: '📦 Total coletado', value: String(colecao.reduce((a, c) => a + c.quantidade, 0)), inline: true },
-        { name: '✅ Únicas', value: String(unicas), inline: true },
-      )
-      .setImage('attachment://colecao.png')
-      .setColor('#e53935')
-      .setFooter({ text: `Use !colecao <página> para navegar • Página ${pagina} de ${totalPaginas}` })
-      .setTimestamp();
-
-    await msg.edit({ embeds: [e], files: [attachment] });
-  } catch (err) {
-    console.error('Erro colecao:', err);
-    await msg.edit({ embeds: [embed('❌ Erro', 'Erro ao gerar a coleção.')] });
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !album
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdAlbum(message) {
-  if (!checkCanal(message)) return;
-
-  const userId = message.author.id;
-  ensureUser(userId);
-
-  const stats = queries.getStats.get(userId) || {};
-  const { unicas, total, percentual } = getPercentualAlbum(userId);
-  const pacotes = getPacotesUser(userId);
-
-  const porRaridade = {
-    comum: 0, rara: 0, epica: 0, lendaria: 0, cromada: 0,
-    ...Object.fromEntries(
-      db.prepare(`
-        SELECT f.raridade, COUNT(*) as count
-        FROM colecao c JOIN figurinhas f ON c.figurinha_id = f.id
-        WHERE c.user_id = ? GROUP BY f.raridade
-      `).all(userId).map(r => [r.raridade, r.count])
-    )
-  };
-
-  // Barra de progresso
-  const barLen = 20;
-  const filled = Math.round((unicas / total) * barLen);
-  const barra = '█'.repeat(filled) + '░'.repeat(barLen - filled);
-
-  const e = new EmbedBuilder()
-    .setTitle(`📖 Álbum de ${message.author.username}`)
-    .setThumbnail(message.author.displayAvatarURL())
-    .setDescription(`**Progresso Geral**\n\`[${barra}]\` ${percentual}%\n${unicas} de ${total} figurinhas únicas`)
-    .addFields(
-      { name: '⚪ Comuns', value: String(porRaridade.comum), inline: true },
-      { name: '🔵 Raras', value: String(porRaridade.rara), inline: true },
-      { name: '🟣 Épicas', value: String(porRaridade.epica), inline: true },
-      { name: '🟠 Lendárias', value: String(porRaridade.lendaria), inline: true },
-      { name: '⭐ Cromadas', value: String(porRaridade.cromada), inline: true },
-      { name: '📦 Pacotes', value: String(pacotes.quantidade), inline: true },
-      { name: '📦 Pacotes Abertos', value: String(pacotes.total_abertos || 0), inline: true },
-      { name: '🔄 Trocas', value: String(stats.trocas_realizadas || 0), inline: true },
-      { name: '📊 Total Coletado', value: String(stats.total_figurinhas || 0), inline: true },
-    )
-    .setColor('#e53935')
-    .setTimestamp()
-    .setFooter({ text: '⚽ Álbum da Copa 2022 • Use !colecao para ver suas figurinhas' });
-
-  message.reply({ embeds: [e] });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !trocar @usuario <id_oferta> <id_pedido>
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdTrocar(message, args) {
-  if (!checkCanal(message)) return;
-
-  const receptor = message.mentions.users.first();
-  if (!receptor) return message.reply(embed('❌ Erro', 'Mencione um usuário: `!trocar @usuario <id_oferta> <id_pedido>`'));
-  if (receptor.id === message.author.id) return message.reply(embed('❌ Erro', 'Você não pode trocar consigo mesmo!'));
-
-  const idOferta = parseInt(args[1]);
-  const idPedido = parseInt(args[2]);
-
-  if (isNaN(idOferta) || isNaN(idPedido)) {
-    return message.reply(embed('❌ Erro', 'IDs inválidos!\nUso: `!trocar @usuario <id_oferta> <id_pedido>`\nEx: `!trocar @João 42 100`'));
-  }
-
-  const figOferta = queries.getFigurinha.get(idOferta);
-  const figPedido = queries.getFigurinha.get(idPedido);
-
-  if (!figOferta || !figPedido) {
-    return message.reply(embed('❌ Figurinha não existe', 'Uma das figurinhas informadas não existe.'));
-  }
-
-  const colOferta = queries.getUserFigurinha.get(message.author.id, idOferta);
-  if (!colOferta || colOferta.quantidade < 1) {
-    return message.reply(embed('❌ Sem essa figurinha', `Você não tem a figurinha **${figOferta.nome}** (ID: ${idOferta}) para oferecer!`));
-  }
-
-  if (colOferta.quantidade < 2) {
-    return message.reply(embed('⚠️ Atenção', `Você só tem 1x **${figOferta.nome}**. Certeza que quer trocar sua única cópia?\nResponda com \`!confirmartroca ${idOferta} ${idPedido} ${receptor.id}\``));
-  }
-
-  // Criar proposta de troca
-  const result = queries.criarTroca.run(message.author.id, receptor.id, idOferta, idPedido);
-  const trocaId = result.lastInsertRowid;
-
-  const e = new EmbedBuilder()
-    .setTitle('🔄 Proposta de Troca Enviada!')
-    .setDescription(`${receptor}, você recebeu uma proposta de troca de ${message.author}!`)
-    .addFields(
-      { name: `📤 ${message.author.username} oferece`, value: `${RARIDADE_EMOJI[figOferta.raridade]} **${figOferta.nome}** (${figOferta.pais}) - OVR ${figOferta.overall}\n ID: \`#${idOferta}\``, inline: true },
-      { name: `📥 E quer`, value: `${RARIDADE_EMOJI[figPedido.raridade]} **${figPedido.nome}** (${figPedido.pais}) - OVR ${figPedido.overall}\nID: \`#${idPedido}\``, inline: true },
-    )
-    .addFields({ name: '📋 ID da Troca', value: `\`#${trocaId}\``, inline: false })
-    .setDescription(`${receptor}, você recebeu uma proposta!\nUse \`!aceitartroca ${trocaId}\` para aceitar ou \`!recusartroca ${trocaId}\` para recusar.`)
-    .setColor('#ff9800')
-    .setTimestamp();
-
-  message.reply({ content: `${receptor}`, embeds: [e] });
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDOS: !aceitartroca / !recusartroca
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdAceitarTroca(message, args) {
-  if (!checkCanal(message)) return;
-
-  const trocaId = parseInt(args[0]);
-  if (isNaN(trocaId)) return message.reply(embed('❌', 'ID de troca inválido.'));
-
-  const troca = queries.getTroca.get(trocaId);
-  if (!troca) return message.reply(embed('❌', 'Troca não encontrada.'));
-  if (troca.receptor_id !== message.author.id) return message.reply(embed('❌', 'Essa troca não é para você!'));
-  if (troca.status !== 'pendente') return message.reply(embed('❌', `Essa troca já foi ${troca.status}.`));
-
-  const colPedido = queries.getUserFigurinha.get(message.author.id, troca.figurinha_pedido_id);
-  if (!colPedido || colPedido.quantidade < 1) {
-    return message.reply(embed('❌', 'Você não tem a figurinha que foi pedida!'));
-  }
-
-  const sucesso = executarTroca(trocaId);
-  if (!sucesso) return message.reply(embed('❌ Falha', 'A troca falhou. Verifique se ambas as figurinhas ainda estão disponíveis.'));
-
-  const figOferta = queries.getFigurinha.get(troca.figurinha_oferta_id);
-  const figPedido = queries.getFigurinha.get(troca.figurinha_pedido_id);
-
-  message.reply(embed(
-    '✅ Troca Realizada!',
-    `**Troca #${trocaId} concluída com sucesso!**\n\n<@${troca.solicitante_id}> recebeu: ${RARIDADE_EMOJI[figPedido.raridade]} **${figPedido.nome}**\n<@${troca.receptor_id}> recebeu: ${RARIDADE_EMOJI[figOferta.raridade]} **${figOferta.nome}**`,
-    '#4caf50'
-  ));
-}
-
-async function cmdRecusarTroca(message, args) {
-  if (!checkCanal(message)) return;
-
-  const trocaId = parseInt(args[0]);
-  if (isNaN(trocaId)) return message.reply(embed('❌', 'ID de troca inválido.'));
-
-  const troca = queries.getTroca.get(trocaId);
-  if (!troca) return message.reply(embed('❌', 'Troca não encontrada.'));
-  if (troca.receptor_id !== message.author.id && troca.solicitante_id !== message.author.id) {
-    return message.reply(embed('❌', 'Você não faz parte dessa troca!'));
-  }
-  if (troca.status !== 'pendente') return message.reply(embed('❌', `Essa troca já foi ${troca.status}.`));
-
-  queries.atualizarTroca.run('recusada', trocaId);
-  message.reply(embed('❌ Troca Recusada', `A troca #${trocaId} foi cancelada.`, '#f44336'));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !darfigurinha @usuario <id>
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdDarFigurinha(message, args) {
-  if (!checkCanal(message)) return;
-
-  const receptor = message.mentions.users.first();
-  if (!receptor) return message.reply(embed('❌', 'Mencione um usuário: `!darfigurinha @usuario <id>`'));
-  if (receptor.id === message.author.id) return message.reply(embed('❌', 'Você não pode dar figurinha para si mesmo!'));
-
-  const id = parseInt(args[1]);
-  if (isNaN(id)) return message.reply(embed('❌', 'ID inválido.'));
-
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) return message.reply(embed('❌', 'Figurinha não encontrada.'));
-
-  const col = queries.getUserFigurinha.get(message.author.id, id);
-  if (!col || col.quantidade < 1) {
-    return message.reply(embed('❌', `Você não tem a figurinha **${fig.nome}**!`));
-  }
-
-  if (col.quantidade < 2) {
-    return message.reply(embed('⚠️', `Você só tem 1x desta figurinha. Use \`!trocar\` para uma troca oficial.`));
-  }
-
-  // Transferir
-  queries.removeFigurinhaUser.run(message.author.id, id);
-  db.prepare('DELETE FROM colecao WHERE user_id = ? AND figurinha_id = ? AND quantidade <= 0').run(message.author.id, id);
-  addFigurinhaToUser(receptor.id, id);
-
-  message.reply(embed(
-    '🎁 Figurinha Enviada!',
-    `${message.author} deu a figurinha ${RARIDADE_EMOJI[fig.raridade]} **${fig.nome}** para ${receptor}!`,
-    '#4caf50'
-  ));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !venderfigurinha <id> [quantidade]
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdVenderFigurinha(message, args) {
-  if (!checkCanal(message)) return;
-
-  const id = parseInt(args[0]);
-  const qtd = parseInt(args[1]) || 1;
-  if (isNaN(id)) return message.reply(embed('❌', 'Uso: `!venderfigurinha <id> [quantidade]`'));
-
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) return message.reply(embed('❌', 'Figurinha não encontrada.'));
-
-  const col = queries.getUserFigurinha.get(message.author.id, id);
-  if (!col || col.quantidade < qtd + 1) {
-    return message.reply(embed('❌', `Você precisa ter pelo menos ${qtd + 1}x desta figurinha para vender ${qtd}x (mantendo 1 cópia).`));
-  }
-
-  // Calcular preço baseado na raridade
-  const PRECO_RARIDADE = { comum: 50, rara: 150, epica: 400, lendaria: 1000, cromada: 3000 };
-  const preco = (PRECO_RARIDADE[fig.raridade] || 50) * qtd;
-
-  // Remover figurinhas
-  for (let i = 0; i < qtd; i++) {
-    queries.removeFigurinhaUser.run(message.author.id, id);
-  }
-  db.prepare('DELETE FROM colecao WHERE user_id = ? AND figurinha_id = ? AND quantidade <= 0').run(message.author.id, id);
-
-  // Nota: integração com sistema de economia do servidor
-  message.reply(embed(
-    '💰 Figurinha Vendida!',
-    `Você vendeu **${qtd}x ${fig.nome}** por **${preco} moedas**!\n\n*(Integrando com o sistema de economia do servidor)*`,
-    '#ffc107'
-  ));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !comprarpacote [quantidade]
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdComprarPacote(message, args) {
-  if (!checkCanal(message)) return;
-
-  const qtd = Math.min(parseInt(args[0]) || 1, 10); // máx 10 por vez
-  const total = PRECO_PACOTE * qtd;
-
-  // Nota: integrar com o sistema de economia do servidor
-  // Aqui damos direto (demonstração) — integre com seu bot de economia
-  addPacotesUser(message.author.id, qtd);
-
-  message.reply(embed(
-    '🛒 Pacotes Comprados!',
-    `Você comprou **${qtd}x pacote(s)** por **${total} moedas**!\n\nUse \`!abrirpacote\` para abrir.`,
-    '#4caf50'
-  ));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !rankingalbum
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdRankingAlbum(message) {
-  if (!checkCanal(message)) return;
-
-  const ranking = queries.getRanking.all();
-  if (ranking.length === 0) {
-    return message.reply(embed('🏆 Ranking', 'Ninguém tem figurinhas ainda!'));
-  }
-
-  const medals = ['🥇', '🥈', '🥉'];
-  const total = db.prepare('SELECT COUNT(*) as t FROM figurinhas').get().t;
-
-  let desc = '';
-  for (let i = 0; i < ranking.length; i++) {
-    const r = ranking[i];
-    const medal = medals[i] || `**${i + 1}.**`;
-    const percentual = ((r.figurinhas_unicas / total) * 100).toFixed(1);
-    try {
-      const user = await message.client.users.fetch(r.user_id);
-      desc += `${medal} **${user.username}** — ${r.figurinhas_unicas}/${total} únicas (${percentual}%) | ⭐${r.cromadas} cromadas | 🟠${r.lendarias} lendárias\n`;
-    } catch {
-      desc += `${medal} \`${r.user_id}\` — ${r.figurinhas_unicas} únicas (${percentual}%)\n`;
+function setup(client) {
+  // !kahootmsg
+  client.on("messageCreate", async (msg) => {
+    if (msg.content === "!kahootmsg") {
+      const embed = new EmbedBuilder()
+        .setTitle("🎮 Kahoot Bot")
+        .setDescription("Clique no botão abaixo para entrar em uma sala do Kahoot!")
+        .setColor(0x46178f)
+        .setFooter({ text: "Kahoot Bot • Apenas entra na sala" });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId("kahoot_join")
+          .setLabel("🚀 Entrar na Sala")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await msg.channel.send({ embeds: [embed], components: [row] });
     }
-  }
+  });
 
-  const e = new EmbedBuilder()
-    .setTitle('🏆 Ranking do Álbum da Copa')
-    .setDescription(desc)
-    .setColor('#ffd700')
-    .setTimestamp()
-    .setFooter({ text: '⚽ Álbum da Copa 2022 • Top 10 colecionadores' });
+  // Botão + Modal
+  client.on("interactionCreate", async (interaction) => {
+    if (interaction.isButton() && interaction.customId === "kahoot_join") {
+      const modal = new ModalBuilder()
+        .setCustomId("kahoot_modal")
+        .setTitle("Entrar no Kahoot");
 
-  message.reply({ embeds: [e] });
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("pin")
+            .setLabel("PIN da Sala")
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder("Ex: 123456")
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("nickname")
+            .setLabel("Seu Nickname")
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder("Ex: Player1")
+            .setRequired(true)
+        )
+      );
+
+      await interaction.showModal(modal);
+    }
+
+    if (interaction.isModalSubmit() && interaction.customId === "kahoot_modal") {
+      const pin = interaction.fields.getTextInputValue("pin").trim();
+      const nickname = interaction.fields.getTextInputValue("nickname").trim();
+
+      await interaction.deferReply({ ephemeral: true });
+
+      try {
+        await joinKahoot(pin, nickname);
+
+        await interaction.editReply({
+          embeds: [new EmbedBuilder()
+            .setTitle("✅ Entrou com sucesso!")
+            .setDescription(`**Sala:** \`${pin}\`\n**Nick:** \`${nickname}\``)
+            .setColor(0x57f287)]
+        });
+      } catch (err) {
+        await interaction.editReply({
+          embeds: [new EmbedBuilder()
+            .setTitle("❌ Erro ao entrar")
+            .setDescription(`PIN inválido ou sala encerrada.\n\`${err}\``)
+            .setColor(0xed4245)]
+        });
+      }
+    }
+  });
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDOS ADM
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function isAdmin(message) {
-  return message.member?.permissions.has('Administrator') ||
-    message.member?.permissions.has('ManageGuild');
-}
-
-async function cmdAdmDarPacotes(message, args) {
-  if (!isAdmin(message)) return message.reply(embed('❌', 'Sem permissão!'));
-
-  const target = message.mentions.users.first();
-  const qtd = parseInt(args[1]) || 1;
-  if (!target) return message.reply(embed('❌', 'Mencione um usuário.'));
-
-  addPacotesUser(target.id, qtd);
-  message.reply(embed('✅', `**${qtd}x pacote(s)** adicionado(s) para ${target}!`, '#4caf50'));
-}
-
-async function cmdAdmDarFigurinha(message, args) {
-  if (!isAdmin(message)) return message.reply(embed('❌', 'Sem permissão!'));
-
-  const target = message.mentions.users.first();
-  const id = parseInt(args[1]);
-  if (!target || isNaN(id)) return message.reply(embed('❌', 'Uso: `!darfigurinhaadm @usuario <id>`'));
-
-  const fig = queries.getFigurinha.get(id);
-  if (!fig) return message.reply(embed('❌', 'Figurinha não encontrada.'));
-
-  addFigurinhaToUser(target.id, id);
-  message.reply(embed('✅', `Figurinha **${fig.nome}** (${RARIDADE_EMOJI[fig.raridade]}) dada para ${target}!`, '#4caf50'));
-}
-
-async function cmdAdmResetAlbum(message, args) {
-  if (!isAdmin(message)) return message.reply(embed('❌', 'Sem permissão!'));
-
-  const target = message.mentions.users.first();
-  if (!target) return message.reply(embed('❌', 'Mencione um usuário.'));
-
-  db.prepare('DELETE FROM colecao WHERE user_id = ?').run(target.id);
-  db.prepare('DELETE FROM pacotes_usuario WHERE user_id = ?').run(target.id);
-  db.prepare('DELETE FROM stats_usuario WHERE user_id = ?').run(target.id);
-
-  message.reply(embed('✅', `Álbum de ${target} resetado!`, '#4caf50'));
-}
-
-async function cmdAdmAddPacotes(message, args) {
-  return cmdAdmDarPacotes(message, args); // alias
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// COMANDO: !help / !ajuda
-// ═══════════════════════════════════════════════════════════════════════════════
-async function cmdHelp(message) {
-  if (!checkCanal(message)) return;
-
-  const e = new EmbedBuilder()
-    .setTitle('⚽ Álbum da Copa 2022 — Comandos')
-    .addFields(
-      {
-        name: '📦 Pacotes',
-        value: [
-          '`!abrirpacote` — Abrir 1 pacote (7 figurinhas)',
-          '`!comprarpacote [qtd]` — Comprar pacotes',
-        ].join('\n'),
-      },
-      {
-        name: '📖 Álbum & Coleção',
-        value: [
-          '`!album` — Ver seu álbum e estatísticas',
-          '`!colecao [página]` — Ver sua coleção visual',
-          '`!figurinha <id>` — Ver uma figurinha específica',
-          '`!rankingalbum` — Top 10 colecionadores',
-        ].join('\n'),
-      },
-      {
-        name: '🔄 Trocas & Doações',
-        value: [
-          '`!trocar @user <id_sua> <id_quer>` — Propor troca',
-          '`!aceitartroca <id>` — Aceitar proposta',
-          '`!recusartroca <id>` — Recusar proposta',
-          '`!darfigurinha @user <id>` — Dar figurinha',
-          '`!venderfigurinha <id> [qtd]` — Vender repetidas',
-        ].join('\n'),
-      },
-      {
-        name: '👑 Admin',
-        value: [
-          '`!addpacotes @user <qtd>` — Dar pacotes',
-          '`!darfigurinhaadm @user <id>` — Dar figurinha',
-          '`!resetalbum @user` — Resetar álbum',
-        ].join('\n'),
-      },
-      {
-        name: '🌟 Raridades',
-        value: '⚪ Comum (55%) • 🔵 Rara (28%) • 🟣 Épica (12%) • 🟠 Lendária (4%) • ⭐ Cromada (1%)',
-      },
-    )
-    .setColor('#e53935')
-    .setTimestamp()
-    .setFooter({ text: '980 figurinhas para colecionar!' });
-
-  message.reply({ embeds: [e] });
-}
-
-module.exports = {
-  cmdAbrirPacote,
-  cmdFigurinha,
-  cmdColecao,
-  cmdAlbum,
-  cmdTrocar,
-  cmdAceitarTroca,
-  cmdRecusarTroca,
-  cmdDarFigurinha,
-  cmdVenderFigurinha,
-  cmdComprarPacote,
-  cmdRankingAlbum,
-  cmdAdmDarPacotes,
-  cmdAdmDarFigurinha,
-  cmdAdmResetAlbum,
-  cmdAdmAddPacotes,
-  cmdHelp,
-};
+module.exports = { setup };
