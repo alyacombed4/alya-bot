@@ -1,10 +1,11 @@
 const {
-  ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder, ModalBuilder,
+  ActionRowBuilder, ButtonBuilder, ButtonStyle,
+  EmbedBuilder, ModalBuilder,
   TextInputBuilder, TextInputStyle
 } = require("discord.js");
 const Kahoot = require("kahoot.js-latest");
 
-// Kahoot answer colors — same 4 shapes the game shows players
+// ─── Kahoot colors (same order as game: red, blue, yellow, green) ───
 const COLORS = [
   { emoji: "🔴", label: "Vermelho", style: ButtonStyle.Danger },
   { emoji: "🔵", label: "Azul",     style: ButtonStyle.Primary },
@@ -12,106 +13,110 @@ const COLORS = [
   { emoji: "🟢", label: "Verde",    style: ButtonStyle.Success },
 ];
 
-// channelId → { client, collector, msg, question }
+// channelId → session state
 const sessions = new Map();
 
-// ─────────────────────────────────────────────────────────────
-// Debug helper — logs every key/value of an object shallowly
-// ─────────────────────────────────────────────────────────────
-function debugObject(label, obj) {
-  try {
-    const safe = {};
-    for (const k of Object.keys(obj ?? {})) {
-      const v = obj[k];
-      safe[k] = typeof v === "function" ? "[Function]" : v;
-    }
-    console.log(`[Kahoot DEBUG] ${label}:`, JSON.stringify(safe, null, 2));
-  } catch (e) {
-    console.log(`[Kahoot DEBUG] ${label}: (could not serialize)`, obj);
+// ─────────────────────────────────────────────────────────────────────
+// Fetch full quiz data from Kahoot's public REST API
+// Returns array of questions: [{ question, choices: [{answer, correct}] }]
+// ─────────────────────────────────────────────────────────────────────
+async function fetchQuizData(quizUUID) {
+  const url = `https://kahoot.it/rest/kahoots/${quizUUID}`;
+  console.log("[Kahoot] Fetching quiz data from:", url);
+
+  const res = await fetch(url, {
+    headers: {
+      "User-Agent": "Mozilla/5.0",
+      "Accept": "application/json",
+    },
+  });
+
+  if (!res.ok) {
+    console.warn(`[Kahoot] REST API returned ${res.status} for UUID ${quizUUID}`);
+    return null;
   }
+
+  const data = await res.json();
+  console.log("[Kahoot] Quiz title:", data.title);
+  console.log("[Kahoot] Questions count:", data.questions?.length);
+
+  // Normalize: each question has .question (text) and .choices [{answer, correct}]
+  const questions = (data.questions || []).map((q) => ({
+    question: q.question || q.title || "",
+    image: q.image || null,
+    choices: (q.choices || []).map((c) => ({
+      answer: c.answer || c.text || "",
+      correct: c.correct ?? false,
+    })),
+    // also store raw for debugging
+    _raw: q,
+  }));
+
+  return { title: data.title, questions };
 }
 
-// ─────────────────────────────────────────────────────────────
-// Build question embed — text shown only when available
-// ─────────────────────────────────────────────────────────────
-function buildQuestionEmbed(question, questionNumber) {
-  // kahoot.js-latest may expose text in different fields depending on version
-  const text =
-    question.question ||       // sometimes populated
-    question.title ||          // fallback
-    question.text ||           // fallback
-    null;
-
-  const timeLeft =
-    question.timeLeft ??
-    question.time ??
-    question.timer ??
-    20;
-
-  const numChoices =
-    question.numberOfChoices ??
-    question.choices?.length ??
-    question.answerCount ??
-    4;
-
+// ─────────────────────────────────────────────────────────────────────
+// Build the question embed (with full text if available)
+// ─────────────────────────────────────────────────────────────────────
+function buildQuestionEmbed(questionData, questionIndex, timeLeft) {
   const embed = new EmbedBuilder()
-    .setTitle(`❓ Pergunta ${questionNumber}`)
+    .setTitle(`❓ Pergunta ${questionIndex + 1}`)
     .setColor(0x46178f)
     .setFooter({ text: `⏱ ${timeLeft}s para responder` });
 
-  if (text) {
-    embed.setDescription(`**${text}**`);
-  } else {
-    embed.setDescription(
-      "*Texto da pergunta disponível apenas na tela do apresentador.*\n" +
-      "Escolha a cor/forma que você vê na tela!"
-    );
-  }
+  if (questionData) {
+    embed.setDescription(`**${questionData.question || "Leia na tela do apresentador"}**`);
 
-  // Show answer texts if kahoot.js exposes them
-  const choices = question.choices ?? [];
-  if (choices.length > 0) {
-    const hasText = choices.some(c => c.answer || c.text || c.content);
-    if (hasText) {
+    if (questionData.choices?.length > 0) {
       embed.addFields(
-        choices.slice(0, 4).map((c, i) => ({
+        questionData.choices.slice(0, 4).map((c, i) => ({
           name: `${COLORS[i]?.emoji ?? "⬜"} ${COLORS[i]?.label ?? `Opção ${i + 1}`}`,
-          value: c.answer || c.text || c.content || "—",
+          value: c.answer || "—",
           inline: true,
         }))
       );
     }
+
+    if (questionData.image) {
+      embed.setImage(questionData.image);
+    }
+  } else {
+    embed.setDescription(
+      "*Texto não disponível — leia na tela do apresentador!*\n" +
+      "Clique na cor/forma que você vê na tela:"
+    );
   }
 
   return embed;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Build answer buttons (always 4 colors, disable extras if < 4)
-// ─────────────────────────────────────────────────────────────
-function buildAnswerRow(question) {
-  const numChoices =
-    question.numberOfChoices ??
-    question.choices?.length ??
-    question.answerCount ??
-    4;
+// ─────────────────────────────────────────────────────────────────────
+// Build answer buttons
+// ─────────────────────────────────────────────────────────────────────
+function buildAnswerRow(questionData, numChoices) {
+  const count = questionData?.choices?.length || numChoices || 4;
 
-  const buttons = COLORS.slice(0, 4).map((c, i) =>
-    new ButtonBuilder()
+  const buttons = COLORS.slice(0, 4).map((c, i) => {
+    const choiceText = questionData?.choices?.[i]?.answer;
+    const label = choiceText
+      ? `${c.emoji} ${choiceText.substring(0, 60)}`
+      : `${c.emoji} ${c.label}`;
+
+    return new ButtonBuilder()
       .setCustomId(`kahoot_ans_${i}`)
-      .setLabel(`${c.emoji} ${c.label}`)
+      .setLabel(label)
       .setStyle(c.style)
-      .setDisabled(i >= numChoices)
-  );
+      .setDisabled(i >= count);
+  });
 
   return new ActionRowBuilder().addComponents(buttons);
 }
 
-// ─────────────────────────────────────────────────────────────
-// Connect to Kahoot
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Main connection function
+// ─────────────────────────────────────────────────────────────────────
 async function connectKahoot(pin, nickname, channel, onStatus) {
-  // Close existing session for this channel
+  // Close existing session
   if (sessions.has(channel.id)) {
     const old = sessions.get(channel.id);
     try { old.client?.leave?.(); } catch (_) {}
@@ -121,32 +126,64 @@ async function connectKahoot(pin, nickname, channel, onStatus) {
 
   const client = new Kahoot();
 
-  // Shared state for this session
   const state = {
     client,
     collector: null,
-    msg: null,           // last question message
-    question: null,      // current question object
-    questionNumber: 0,
+    questionMsg: null,   // the current question's Discord message
+    quizData: null,      // fetched from REST API
+    questionIndex: -1,   // tracks current question number
+    answeredThisQ: false,
   };
   sessions.set(channel.id, state);
 
   // ── Joined ──
   client.on("Joined", () => {
-    onStatus("✅ Conectado ao Kahoot via WebSocket! Aguardando o quiz iniciar...");
+    onStatus("✅ Conectado via WebSocket! Aguardando o quiz iniciar...");
   });
 
-  // ── Quiz start ──
+  // ── Quiz start — fetch full quiz data ──
   client.on("QuizStart", async (quiz) => {
-    debugObject("QuizStart", quiz);
+    console.log("[Kahoot] QuizStart event. quiz object keys:", Object.keys(quiz ?? {}));
+
+    // Try multiple possible fields for the UUID
+    const uuid =
+      quiz?.uuid ||
+      quiz?.quizId ||
+      quiz?.quizID ||
+      quiz?.id ||
+      quiz?.kahootId ||
+      client?.quiz?.uuid ||
+      client?.quiz?.quizId ||
+      client?.quizId;
+
+    console.log("[Kahoot] Detected quiz UUID:", uuid);
+
+    let titleText = quiz?.name || quiz?.title || "Quiz";
+
+    if (uuid) {
+      try {
+        state.quizData = await fetchQuizData(uuid);
+        if (state.quizData) {
+          titleText = state.quizData.title || titleText;
+          console.log(`[Kahoot] Loaded ${state.quizData.questions.length} questions from REST API`);
+        }
+      } catch (err) {
+        console.warn("[Kahoot] Failed to fetch quiz data:", err.message);
+      }
+    } else {
+      console.warn("[Kahoot] No UUID found — will show colors only (no text)");
+    }
+
     await channel.send({
       embeds: [
         new EmbedBuilder()
           .setTitle("🎮 Quiz iniciado!")
           .setDescription(
-            quiz?.name
-              ? `**${quiz.name}** começou!\nAs perguntas aparecerão aqui com botões de cores.`
-              : "O Kahoot começou! As perguntas aparecerão aqui com botões de cores."
+            `**${titleText}** começou!\n\n` +
+            (state.quizData
+              ? `📋 ${state.quizData.questions.length} perguntas carregadas — você verá o texto completo!\n`
+              : "⚠️ Não foi possível carregar as perguntas. Só mostrarei as cores.\n") +
+            "Responda clicando nos botões coloridos!"
           )
           .setColor(0x46178f),
       ],
@@ -155,9 +192,15 @@ async function connectKahoot(pin, nickname, channel, onStatus) {
 
   // ── Question start ──
   client.on("QuestionStart", async (question) => {
-    debugObject("QuestionStart", question);
-    state.question = question;
-    state.questionNumber += 1;
+    // IMPORTANT: always reset state for each new question
+    state.answeredThisQ = false;
+    state.questionIndex += 1;
+    const idx = state.questionIndex;
+
+    console.log(
+      `[Kahoot] QuestionStart #${idx}. question keys:`,
+      Object.keys(question ?? {})
+    );
 
     // Stop previous collector
     if (state.collector) {
@@ -165,48 +208,61 @@ async function connectKahoot(pin, nickname, channel, onStatus) {
       state.collector = null;
     }
 
+    // Resolve time
     const timeLeft =
-      question.timeLeft ?? question.time ?? question.timer ?? 20;
+      question?.timeLeft ??
+      question?.time ??
+      question?.timer ??
+      20;
 
-    const embed = buildQuestionEmbed(question, state.questionNumber);
-    const row   = buildAnswerRow(question);
+    // Look up pre-fetched question data by index
+    const qData = state.quizData?.questions?.[idx] ?? null;
 
-    // Send or update message
-    try {
-      if (state.msg) {
-        await state.msg.edit({ embeds: [embed], components: [row] });
-      } else {
-        state.msg = await channel.send({ embeds: [embed], components: [row] });
-      }
-    } catch (_) {
-      state.msg = await channel.send({ embeds: [embed], components: [row] });
-    }
+    const numChoices =
+      question?.numberOfChoices ??
+      question?.choices?.length ??
+      question?.answerCount ??
+      qData?.choices?.length ??
+      4;
+
+    const embed = buildQuestionEmbed(qData, idx, timeLeft);
+    const row   = buildAnswerRow(qData, numChoices);
+
+    // Always send a NEW message per question (never edit — avoids the "only 1 question" bug)
+    state.questionMsg = await channel.send({
+      embeds: [embed],
+      components: [row],
+    });
 
     // Collect one button click
-    state.collector = state.msg.createMessageComponentCollector({
+    state.collector = state.questionMsg.createMessageComponentCollector({
       filter: (i) => i.customId.startsWith("kahoot_ans_"),
-      time: timeLeft * 1000 + 4000,
+      time: (timeLeft + 4) * 1000,
       max: 1,
     });
 
     state.collector.on("collect", async (btnInteraction) => {
-      const idx = parseInt(btnInteraction.customId.replace("kahoot_ans_", ""), 10);
-      const color = COLORS[idx];
+      state.answeredThisQ = true;
+      const answerIdx = parseInt(btnInteraction.customId.replace("kahoot_ans_", ""), 10);
+      const color = COLORS[answerIdx];
 
-      // Answer the question
+      // Submit the answer to Kahoot
       try {
-        state.question.answer(idx);
+        question.answer(answerIdx);
       } catch (err) {
-        console.error("[Kahoot] answer() error:", err);
-        // Some versions use a different method name
-        try { state.question.sendAnswer?.(idx); } catch (_) {}
+        console.warn("[Kahoot] question.answer() failed:", err.message);
       }
+
+      const choiceText = qData?.choices?.[answerIdx]?.answer;
+      const desc = choiceText
+        ? `Você escolheu: ${color.emoji} **${choiceText}**`
+        : `Você escolheu: ${color.emoji} **${color.label}**`;
 
       await btnInteraction.update({
         embeds: [
           new EmbedBuilder()
             .setTitle("✅ Resposta enviada!")
-            .setDescription(`Você escolheu: ${color.emoji} **${color.label}**`)
+            .setDescription(desc)
             .setColor(0x57f287),
         ],
         components: [],
@@ -215,9 +271,9 @@ async function connectKahoot(pin, nickname, channel, onStatus) {
 
     state.collector.on("end", async (collected, reason) => {
       if (reason === "new_question" || reason === "question_end") return;
-      if (collected.size === 0 && state.msg) {
+      if (!state.answeredThisQ && state.questionMsg) {
         try {
-          await state.msg.edit({
+          await state.questionMsg.edit({
             embeds: [
               new EmbedBuilder()
                 .setTitle("⏰ Tempo esgotado!")
@@ -231,50 +287,69 @@ async function connectKahoot(pin, nickname, channel, onStatus) {
     });
   });
 
-  // ── Question end ──
+  // ── Question end — show correct answer ──
   client.on("QuestionEnd", async (result) => {
-    debugObject("QuestionEnd", result);
+    console.log("[Kahoot] QuestionEnd. result keys:", Object.keys(result ?? {}));
 
     if (state.collector) {
       state.collector.stop("question_end");
       state.collector = null;
     }
 
-    const correct = result?.correctAnswers ?? result?.correct ?? [];
-    const isRight = result?.isCorrect ?? result?.correct !== undefined ? false : null;
+    const idx = state.questionIndex;
+    const qData = state.quizData?.questions?.[idx] ?? null;
 
-    // Map correct answer indices to color labels
-    const correctLabels = (Array.isArray(correct) ? correct : [correct])
-      .map((c) => {
-        if (typeof c === "number") {
-          return `${COLORS[c]?.emoji ?? "?"} ${COLORS[c]?.label ?? c}`;
-        }
-        return String(c);
-      })
-      .join(", ");
+    // Find correct answers
+    const correctIndices = [];
+    if (qData) {
+      qData.choices.forEach((c, i) => {
+        if (c.correct) correctIndices.push(i);
+      });
+    }
+
+    const isRight = result?.isCorrect ?? null;
+    const points  = result?.points ?? result?.pointsData?.totalPoints ?? null;
+    const rank    = result?.rank ?? null;
+
+    // Build result description
+    let desc = "";
+    if (correctIndices.length > 0) {
+      const correctLabels = correctIndices
+        .map((i) => {
+          const c = COLORS[i];
+          const text = qData?.choices?.[i]?.answer;
+          return text
+            ? `${c.emoji} **${text}**`
+            : `${c.emoji} **${c.label}**`;
+        })
+        .join(", ");
+      desc = `Resposta correta: ${correctLabels}`;
+    } else if (result?.correctAnswers?.length > 0) {
+      desc = `Resposta correta: **${result.correctAnswers.join(", ")}**`;
+    } else {
+      desc = "Fim da pergunta.";
+    }
 
     const embed = new EmbedBuilder()
-      .setTitle(isRight === true ? "✅ Correto!" : isRight === false ? "❌ Errou!" : "📊 Resultado")
-      .setDescription(
-        correctLabels
-          ? `Resposta(s) correta(s): **${correctLabels}**`
-          : "Fim da pergunta."
+      .setTitle(
+        isRight === true  ? "✅ Correto!" :
+        isRight === false ? "❌ Errou!"   :
+                            "📊 Resultado da Pergunta"
       )
-      .setColor(isRight === true ? 0x57f287 : isRight === false ? 0xed4245 : 0x46178f);
+      .setDescription(desc)
+      .setColor(
+        isRight === true  ? 0x57f287 :
+        isRight === false ? 0xed4245 :
+                            0x46178f
+      );
 
-    if (result?.points != null)  embed.addFields({ name: "Pontos ganhos", value: String(result.points), inline: true });
-    if (result?.rank   != null)  embed.addFields({ name: "Sua posição",   value: `#${result.rank}`,    inline: true });
-    if (result?.total  != null)  embed.addFields({ name: "Total",         value: String(result.total), inline: true });
+    if (points != null) embed.addFields({ name: "Pontos ganhos", value: `+${points}`, inline: true });
+    if (rank   != null) embed.addFields({ name: "Sua posição",   value: `#${rank}`,   inline: true });
 
+    // Send as a new follow-up message (don't edit, keeps question visible)
     try {
-      if (state.msg) {
-        await state.msg.edit({ embeds: [embed], components: [] });
-      } else {
-        await channel.send({ embeds: [embed] });
-      }
+      await channel.send({ embeds: [embed] });
     } catch (_) {}
-
-    state.msg = null;
   });
 
   // ── Quiz end ──
@@ -293,52 +368,48 @@ async function connectKahoot(pin, nickname, channel, onStatus) {
   // ── Disconnect ──
   client.on("Disconnect", async (reason) => {
     sessions.delete(channel.id);
-    await channel
-      .send({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("🔌 Desconectado")
-            .setDescription(`Motivo: ${reason || "desconhecido"}`)
-            .setColor(0xed4245),
-        ],
-      })
-      .catch(() => {});
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("🔌 Desconectado")
+          .setDescription(`Motivo: ${reason || "desconhecido"}`)
+          .setColor(0xed4245),
+      ],
+    }).catch(() => {});
   });
 
-  // ── Errors ──
+  // ── Error ──
   client.on("error", async (err) => {
-    console.error("[Kahoot] Erro:", err);
-    await channel
-      .send({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("❌ Erro no Kahoot")
-            .setDescription(err?.message || String(err))
-            .setColor(0xed4245),
-        ],
-      })
-      .catch(() => {});
+    console.error("[Kahoot] Error:", err);
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("❌ Erro no Kahoot")
+          .setDescription(err?.message || String(err))
+          .setColor(0xed4245),
+      ],
+    }).catch(() => {});
   });
 
-  // Join
   await client.join(pin, nickname);
   return client;
 }
 
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 // Bot setup
-// ─────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 function setup(client) {
-  // !kahootmsg — send panel
   client.on("messageCreate", async (msg) => {
-    if (msg.author.bot) return;
-    if (msg.content !== "!kahootmsg") return;
+    if (msg.author.bot || msg.content !== "!kahootmsg") return;
 
     const embed = new EmbedBuilder()
       .setTitle("🎮 Kahoot Bot")
-      .setDescription("Clique no botão abaixo para entrar em uma sala do Kahoot!\nAs perguntas aparecerão aqui com **botões coloridos** para você responder.")
+      .setDescription(
+        "Clique no botão abaixo para entrar em uma sala do Kahoot!\n" +
+        "As **perguntas e respostas** aparecerão aqui em texto completo + botões coloridos."
+      )
       .setColor(0x46178f)
-      .setFooter({ text: "Kahoot Bot • Conecta via WebSocket" });
+      .setFooter({ text: "Kahoot Bot • Conecta via WebSocket + REST API" });
 
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder()
@@ -350,10 +421,9 @@ function setup(client) {
     await msg.channel.send({ embeds: [embed], components: [row] });
   });
 
-  // Interactions
   client.on("interactionCreate", async (interaction) => {
 
-    // ── "Entrar na Sala" button ──
+    // ── Join button → open modal ──
     if (interaction.isButton() && interaction.customId === "kahoot_join") {
       const modal = new ModalBuilder()
         .setCustomId("kahoot_modal")
@@ -366,8 +436,7 @@ function setup(client) {
             .setLabel("PIN da Sala")
             .setStyle(TextInputStyle.Short)
             .setPlaceholder("Ex: 3552907")
-            .setMinLength(4)
-            .setMaxLength(9)
+            .setMinLength(4).setMaxLength(9)
             .setRequired(true)
         ),
         new ActionRowBuilder().addComponents(
@@ -376,8 +445,7 @@ function setup(client) {
             .setLabel("Seu Nickname")
             .setStyle(TextInputStyle.Short)
             .setPlaceholder("Ex: Player1")
-            .setMinLength(1)
-            .setMaxLength(15)
+            .setMinLength(1).setMaxLength(15)
             .setRequired(true)
         )
       );
@@ -393,60 +461,49 @@ function setup(client) {
 
       await interaction.deferReply({ ephemeral: true });
       await interaction.editReply({
-        embeds: [
-          new EmbedBuilder()
-            .setTitle("🎮 Conectando ao Kahoot...")
-            .setDescription("⏳ Estabelecendo conexão WebSocket...")
-            .setColor(0x46178f),
-        ],
+        embeds: [new EmbedBuilder()
+          .setTitle("🎮 Conectando...")
+          .setDescription("⏳ Estabelecendo conexão WebSocket...")
+          .setColor(0x46178f)],
       });
 
       try {
         await connectKahoot(pin, nickname, interaction.channel, async (statusMsg) => {
           await interaction.editReply({
-            embeds: [
-              new EmbedBuilder()
-                .setTitle("🎮 Kahoot Bot")
-                .setDescription(statusMsg)
-                .setColor(0x46178f),
-            ],
+            embeds: [new EmbedBuilder()
+              .setTitle("🎮 Kahoot Bot")
+              .setDescription(statusMsg)
+              .setColor(0x46178f)],
           });
         });
 
         await interaction.channel.send({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle("🎮 Kahoot conectado!")
-              .setDescription(
-                `<@${interaction.user.id}> entrou como **${nickname}**.\n` +
-                `🔗 Conectado ao PIN **${pin}** via WebSocket.\n\n` +
-                `Quando o jogo começar, responda clicando nas **cores**!\n` +
-                `🔴 Vermelho • 🔵 Azul • 🟡 Amarelo • 🟢 Verde`
-              )
-              .setColor(0x46178f),
-          ],
+          embeds: [new EmbedBuilder()
+            .setTitle("🎮 Kahoot conectado!")
+            .setDescription(
+              `<@${interaction.user.id}> entrou como **${nickname}**.\n` +
+              `🔗 Conectado ao PIN **${pin}**.\n\n` +
+              `Quando o quiz iniciar, cada pergunta aparecerá aqui com **texto completo** e botões!\n` +
+              `🔴 Vermelho • 🔵 Azul • 🟡 Amarelo • 🟢 Verde`
+            )
+            .setColor(0x46178f)],
         });
 
         await interaction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle("✅ Conectado!")
-              .setDescription(`Entrou na sala **${pin}** como **${nickname}**.`)
-              .setColor(0x57f287),
-          ],
+          embeds: [new EmbedBuilder()
+            .setTitle("✅ Conectado!")
+            .setDescription(`Entrou na sala **${pin}** como **${nickname}**.`)
+            .setColor(0x57f287)],
         });
+
       } catch (err) {
-        console.error("[Kahoot] Erro ao conectar:", err);
+        console.error("[Kahoot] Connection error:", err);
         await interaction.editReply({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle("❌ Erro ao conectar")
-              .setDescription(
-                `${err?.message || err}\n\nVerifique se o PIN está correto e se o jogo está aberto para entrar.`
-              )
-              .setColor(0xed4245)
-              .setFooter({ text: "Verifique o PIN e tente novamente" }),
-          ],
+          embeds: [new EmbedBuilder()
+            .setTitle("❌ Erro ao conectar")
+            .setDescription(`${err?.message || err}\n\nVerifique se o PIN está correto e se o jogo está aberto.`)
+            .setColor(0xed4245)
+            .setFooter({ text: "Verifique o PIN e tente novamente" })],
         });
       }
     }
