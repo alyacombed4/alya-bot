@@ -49,7 +49,13 @@ async function getToken(pin) {
 
 async function joinKahoot(pin, nickname) {
   pin = pin.replace(/\s/g, "");
-  const token = await getToken(pin);
+  let token = await getToken(pin);
+
+  // Remove tudo a partir do # pois quebra a URL do WebSocket
+  token = token.split("#")[0];
+  // Remove caracteres inválidos em URL
+  token = encodeURIComponent(token);
+
   const ws = new WebSocket(`wss://kahoot.it/cometd/${pin}/${token}`);
 
   return new Promise((resolve, reject) => {
@@ -124,7 +130,7 @@ function setup(client) {
             .setCustomId("pin")
             .setLabel("PIN da Sala")
             .setStyle(TextInputStyle.Short)
-            .setPlaceholder("Ex: 363 5802")
+            .setPlaceholder("Ex: 356 7894")
             .setRequired(true)
         ),
         new ActionRowBuilder().addComponents(
