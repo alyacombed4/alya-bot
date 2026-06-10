@@ -4,10 +4,17 @@ const chromium = require("@sparticuz/chromium");
 
 async function getBrowser() {
   return puppeteer.launch({
-    args: chromium.args,
+    args: [
+      ...chromium.args,
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--single-process"
+    ],
     defaultViewport: chromium.defaultViewport,
     executablePath: await chromium.executablePath(),
-    headless: true
+    headless: chromium.headless
   });
 }
 
@@ -16,19 +23,16 @@ async function joinKahoot(pin, nickname, onStep) {
   let browser;
 
   try {
-    // ── Passo 1: Abrindo navegador
     await onStep(1, "⏳ Abrindo navegador...");
     browser = await getBrowser();
     const page = await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36");
     await onStep(1, "✅ Navegador aberto");
 
-    // ── Passo 2: Acessando kahoot.it
     await onStep(2, "⏳ Acessando kahoot.it...");
     await page.goto("https://kahoot.it", { waitUntil: "networkidle2", timeout: 20000 });
     await onStep(2, "✅ Site carregado");
 
-    // ── Passo 3: Inserindo PIN
     await onStep(3, "⏳ Inserindo PIN...");
     await page.waitForSelector("input[data-functional-selector='game-input-text']", { timeout: 10000 });
     await page.click("input[data-functional-selector='game-input-text']");
@@ -37,7 +41,6 @@ async function joinKahoot(pin, nickname, onStep) {
     await page.click("button[data-functional-selector='join-game-pin']");
     await onStep(3, "✅ PIN inserido");
 
-    // ── Passo 4: Inserindo nickname
     await onStep(4, "⏳ Inserindo nickname...");
     await page.waitForSelector("input[data-functional-selector='nickname-input']", { timeout: 10000 });
     await new Promise(r => setTimeout(r, 1000));
@@ -48,7 +51,6 @@ async function joinKahoot(pin, nickname, onStep) {
     await page.click("button[data-functional-selector='join-button-username']");
     await onStep(4, "✅ Nickname inserido");
 
-    // ── Passo 5: Aguardando entrar na sala
     await onStep(5, "⏳ Aguardando entrar na sala...");
     await page.waitForFunction(() => {
       return document.querySelector("[data-functional-selector='waiting-screen']") !== null
@@ -57,8 +59,7 @@ async function joinKahoot(pin, nickname, onStep) {
     }, { timeout: 15000 });
     await onStep(5, "✅ Entrou na sala! Aguardando o jogo começar...");
 
-    // Mantém o navegador aberto enquanto estiver na sala
-    await new Promise(r => setTimeout(r, 300000)); // 5 minutos max
+    await new Promise(r => setTimeout(r, 300000));
   } finally {
     if (browser) await browser.close();
   }
@@ -123,7 +124,6 @@ function setup(client) {
 
       await interaction.deferReply({ ephemeral: true });
 
-      // Estado dos passos
       const passos = {
         1: "⬜ Abrindo navegador...",
         2: "⬜ Acessando kahoot.it...",
