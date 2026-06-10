@@ -9,12 +9,14 @@
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
     "@distube/ytdl-core": "^4.16.12",
+    "@sparticuz/chromium": "^133.0.0",
     "archiver": "^8.0.0",
     "axios": "^1.17.0",
     "discord.js": "^14.26.4",
     "express": "^5.2.1",
     "ffmpeg-static": "^5.3.0",
     "openai": "^6.42.0",
+    "puppeteer-core": "^24.0.0",
     "sodium-native": "^5.1.0",
     "ws": "^8.18.0",
     "youtubei.js": "^17.0.1"
