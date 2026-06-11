@@ -1,6 +1,7 @@
 [phases.setup]
 nixPkgs = [
   "chromium",
+  "glib",
   "nss",
   "nspr",
   "atk",
@@ -9,9 +10,6 @@ nixPkgs = [
   "expat",
   "libdrm",
   "libxkbcommon",
-  "mesa",
-  "libGL",
-  "glib",
   "gtk3",
   "pango",
   "cairo",
@@ -24,3 +22,9 @@ nixPkgs = [
   "xorg.libxcb",
   "alsa-lib",
 ]
+
+[phases.install]
+cmds = ["npm ci"]
+
+[start]
+cmd = "node index.js"
