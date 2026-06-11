@@ -25,6 +25,7 @@ const BACKUP_CHANNEL_ID = "1479261311635554435";
 const ZIP_URL = "https://github.com/alyacombed2/alya-bot1/archive/refs/heads/main.zip";
 const ZIP_FILE_NAME = "alya-bot-main.zip";
 
+
 require("./systems/main")(client);
 require("./systems/gfzin")(client);
 require("./systems/coco")(client);
