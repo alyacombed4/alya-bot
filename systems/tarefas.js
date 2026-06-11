@@ -195,6 +195,33 @@ function embedStatus(titulo, passos) {
 }
 
 // ─────────────────────────────────────────────
+// DETECTA O CAMINHO DO CHROMIUM NO AMBIENTE
+// ─────────────────────────────────────────────
+function getChromiumPath() {
+  // Variável de ambiente tem prioridade absoluta (Railway, Docker, etc.)
+  if (process.env.PUPPETEER_EXECUTABLE_PATH) {
+    return process.env.PUPPETEER_EXECUTABLE_PATH;
+  }
+
+  // Tenta encontrar o Chromium instalado no sistema
+  const fs = require("fs");
+  const candidatos = [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/snap/bin/chromium",
+  ];
+
+  for (const caminho of candidatos) {
+    if (fs.existsSync(caminho)) return caminho;
+  }
+
+  // Se não encontrou nada, deixa o Puppeteer tentar o bundled
+  return undefined;
+}
+
+// ─────────────────────────────────────────────
 // INICIAR SESSÃO COM PUPPETEER
 // ─────────────────────────────────────────────
 async function iniciarSessao(client, interaction, ra, senha) {
@@ -203,13 +230,18 @@ async function iniciarSessao(client, interaction, ra, senha) {
 
   let browser;
   try {
+    const executablePath = getChromiumPath();
+
     browser = await puppeteer.launch({
       headless: "new",
+      executablePath,          // undefined = usa bundled; string = usa o sistema
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
         "--disable-gpu",
+        "--single-process",    // essencial no Railway/contêiner
+        "--no-zygote",         // essencial no Railway/contêiner
       ],
     });
 
@@ -291,7 +323,7 @@ async function iniciarSessao(client, interaction, ra, senha) {
       ];
       const resultado = [];
       for (const sel of seletores) {
-        document.querySelectorAll(sel).forEach((el, i) => {
+        document.querySelectorAll(sel).forEach((el) => {
           const titulo = (
             el.querySelector("h1,h2,h3,h4,h5")?.innerText ||
             el.querySelector("p,span")?.innerText ||
@@ -524,4 +556,4 @@ async function processarTarefas(client, user, sessao) {
 
   try { await browser.close(); } catch (_) {}
   sessoes.delete(user.id);
-                    }
+}
