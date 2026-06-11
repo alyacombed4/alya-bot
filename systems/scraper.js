@@ -6,7 +6,15 @@ const BASE_URL = "https://saladofuturo.educacao.sp.gov.br";
 async function login(ra, senha) {
   const browser = await puppeteer.launch({
     headless: true,
-    args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-zygote",
+      "--single-process",
+    ],
   });
 
   const page = await browser.newPage();
@@ -21,10 +29,18 @@ async function login(ra, senha) {
   // Preenche RA e senha
   await page.waitForSelector("input[name='ra'], input[id='ra'], input[placeholder*='RA']", { timeout: 10000 });
   const raInput = await page.$("input[name='ra'], input[id='ra'], input[placeholder*='RA'], input[type='text']");
+  if (!raInput) {
+    await browser.close();
+    throw new Error("Campo de RA não encontrado na página de login.");
+  }
   await raInput.click({ clickCount: 3 });
   await raInput.type(String(ra), { delay: 50 });
 
   const senhaInput = await page.$("input[type='password']");
+  if (!senhaInput) {
+    await browser.close();
+    throw new Error("Campo de senha não encontrado na página de login.");
+  }
   await senhaInput.click({ clickCount: 3 });
   await senhaInput.type(String(senha), { delay: 50 });
 
@@ -47,19 +63,15 @@ async function login(ra, senha) {
 
 // ─── Lista tarefas (pendentes + expiradas) ───────────────────────────
 async function listarTarefas(page) {
-  // Navega para área de tarefas
   await page.goto(`${BASE_URL}/tarefas`, { waitUntil: "networkidle2", timeout: 20000 });
 
-  // Aguarda lista carregar
-  await page.waitForSelector(".tarefa, [class*='tarefa'], [class*='task'], .atividade", {
-    timeout: 15000,
-  }).catch(() => console.warn("[Scraper] Seletor padrão não encontrado, tentando fallback..."));
+  await page
+    .waitForSelector(".tarefa, [class*='tarefa'], [class*='task'], .atividade", { timeout: 15000 })
+    .catch(() => console.warn("[Scraper] Seletor padrão não encontrado, tentando fallback..."));
 
-  // Extrai dados das tarefas
   const tarefas = await page.evaluate(() => {
     const itens = [];
 
-    // Tenta vários seletores comuns de SPAs educacionais
     const candidatos = [
       ...document.querySelectorAll(".tarefa"),
       ...document.querySelectorAll("[class*='tarefa']"),
@@ -70,7 +82,6 @@ async function listarTarefas(page) {
       ...document.querySelectorAll(".card"),
     ];
 
-    // Deduplica por texto
     const vistos = new Set();
     for (const el of candidatos) {
       const texto = el.innerText?.trim();
@@ -83,7 +94,6 @@ async function listarTarefas(page) {
         texto.split("\n")[0]
       ).trim().substring(0, 120);
 
-      // Tenta detectar status
       const elText = el.innerText.toLowerCase();
       let status = "pendente";
       if (elText.includes("expirad") || elText.includes("encerrad") || elText.includes("vencid")) {
@@ -92,7 +102,6 @@ async function listarTarefas(page) {
         status = "entregue";
       }
 
-      // Tenta pegar prazo
       const prazoMatch = el.innerText.match(/\d{2}\/\d{2}\/\d{4}/);
       const prazo = prazoMatch ? prazoMatch[0] : null;
 
@@ -115,10 +124,12 @@ async function extrairQuestoes(browser, url) {
   console.log("[Scraper] Abrindo tarefa:", url);
   await page.goto(url, { waitUntil: "networkidle2", timeout: 25000 });
 
-  await page.waitForSelector(
-    ".questao, [class*='questao'], [class*='question'], .enunciado, [class*='enunciado']",
-    { timeout: 15000 }
-  ).catch(() => console.warn("[Scraper] Seletor de questão não encontrado"));
+  await page
+    .waitForSelector(
+      ".questao, [class*='questao'], [class*='question'], .enunciado, [class*='enunciado']",
+      { timeout: 15000 }
+    )
+    .catch(() => console.warn("[Scraper] Seletor de questão não encontrado"));
 
   const questoes = await page.evaluate(() => {
     const resultado = [];
@@ -139,7 +150,6 @@ async function extrairQuestoes(browser, url) {
       if (!texto || vistos.has(texto)) continue;
       vistos.add(texto);
 
-      // Detecta alternativas (múltipla escolha)
       const alternativas = [];
       const altEls = bloco.querySelectorAll(
         "li, [class*='alternativa'], [class*='opcao'], [class*='option'], label"
@@ -151,7 +161,6 @@ async function extrairQuestoes(browser, url) {
 
       const tipo = alternativas.length > 0 ? "multipla_escolha" : "dissertativa";
 
-      // Pega imagem se houver
       const img = bloco.querySelector("img");
       const imagem = img?.src || null;
 
@@ -184,12 +193,10 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
 
   await page.goto(tarefaUrl, { waitUntil: "networkidle2", timeout: 25000 });
 
-  await page.waitForSelector(
-    ".questao, [class*='questao'], [class*='question']",
-    { timeout: 15000 }
-  ).catch(() => {});
+  await page
+    .waitForSelector(".questao, [class*='questao'], [class*='question']", { timeout: 15000 })
+    .catch(() => {});
 
-  // Tenta clicar na alternativa ou preencher campo de texto
   const sucesso = await page.evaluate(
     (numQ, resp) => {
       const blocos = [
@@ -199,7 +206,6 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
       const bloco = blocos[numQ - 1];
       if (!bloco) return false;
 
-      // Múltipla escolha: tenta encontrar opção pelo texto
       const opcoes = bloco.querySelectorAll(
         "input[type='radio'], input[type='checkbox'], [class*='alternativa'], [class*='opcao'], label"
       );
@@ -210,7 +216,6 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
         }
       }
 
-      // Dissertativa: procura textarea ou input text
       const textarea = bloco.querySelector("textarea, input[type='text']");
       if (textarea) {
         textarea.focus();
@@ -227,7 +232,6 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
   );
 
   if (sucesso) {
-    // Tenta salvar / próxima
     await page.evaluate(() => {
       const btns = [...document.querySelectorAll("button, [class*='btn'], [class*='salvar'], [class*='enviar']")];
       const salvar = btns.find(
