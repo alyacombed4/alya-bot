@@ -32,7 +32,7 @@ require("./systems/coco")(client);
 require("./systems/comandos")(client);
 require("./systems/uno")(client);
 require("./systems/ia")(client);
-require("./systems/tarefas")(client);
+
 require("./systems/Kahoot").setup(client);
 
 
