@@ -3,12 +3,10 @@ const puppeteer = require("puppeteer");
 const BASE_URL = "https://saladofuturo.educacao.sp.gov.br";
 const DELAY_ANTES_ENVIAR = 7 * 60 * 1000; // 7 minutos
 
-// ─── Sleep helper ─────────────────────────────────────────────────────
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ─── Lança o browser ─────────────────────────────────────────────────
 async function launchBrowser() {
   const executablePath =
     process.env.PUPPETEER_EXECUTABLE_PATH ||
@@ -43,56 +41,79 @@ async function login(ra, senha) {
   );
 
   // ── Passo 1: abre página de login ────────────────────────────────
-  console.log("[Scraper] Passo 1: Abrindo página de login...");
+  console.log("[Scraper] Abrindo página de login...");
   await page.goto(`${BASE_URL}/login-alunos`, {
     waitUntil: "networkidle2",
     timeout: 40000,
   });
   await sleep(3000);
 
-  // ── Passo 2: preenche RA ─────────────────────────────────────────
-  console.log("[Scraper] Passo 2: Preenchendo RA...");
-  const raSelector = "input[name='ra'], input[id='ra'], input[placeholder*='RA'], input[placeholder*='ra'], input[type='text']";
-  await page.waitForSelector(raSelector, { timeout: 15000 });
-  const raInput = await page.$(raSelector);
+  // ── Passo 2: preenche RA (primeiro input de texto) ───────────────
+  // O campo RA tem placeholder "Ex.: 186735683"
+  console.log("[Scraper] Preenchendo RA...");
+  await page.waitForSelector("input", { timeout: 15000 });
+
+  // Pega todos os inputs visíveis
+  const inputs = await page.$$("input");
+
+  // Primeiro input = RA principal
+  const raInput = inputs[0];
   if (!raInput) {
     await browser.close();
     throw new Error("Campo de RA não encontrado.");
   }
   await raInput.click({ clickCount: 3 });
-  await sleep(500);
+  await sleep(300);
   await raInput.type(String(ra), { delay: 80 });
-  await sleep(1000);
+  await sleep(500);
 
-  // ── Passo 3: preenche senha ──────────────────────────────────────
-  console.log("[Scraper] Passo 3: Preenchendo senha...");
+  // ── Passo 3: deixa Dígito RA com valor padrão (0) ────────────────
+  // Segundo input = Dígito RA — não mexemos, já vem com 0
+  console.log("[Scraper] Dígito RA deixado como padrão (0).");
+
+  // ── Passo 4: preenche senha ──────────────────────────────────────
+  console.log("[Scraper] Preenchendo senha...");
   const senhaInput = await page.$("input[type='password']");
   if (!senhaInput) {
     await browser.close();
     throw new Error("Campo de senha não encontrado.");
   }
   await senhaInput.click({ clickCount: 3 });
-  await sleep(500);
+  await sleep(300);
   await senhaInput.type(String(senha), { delay: 80 });
-  await sleep(1500);
+  await sleep(1000);
 
-  // ── Passo 4: clica no botão de login ────────────────────────────
-  console.log("[Scraper] Passo 4: Clicando em entrar...");
-  const botaoLogin = await page.$(
-    "button[type='submit'], input[type='submit'], button"
-  );
-  if (botaoLogin) {
-    await botaoLogin.click();
-  } else {
-    await page.keyboard.press("Enter");
+  // ── Passo 5: clica em "Acessar" ──────────────────────────────────
+  console.log("[Scraper] Clicando em Acessar...");
+
+  // Procura botão com texto "Acessar"
+  const clicou = await page.evaluate(() => {
+    const btns = [...document.querySelectorAll("button")];
+    const acessar = btns.find(
+      (b) => b.innerText?.trim().toLowerCase() === "acessar"
+    );
+    if (acessar) { acessar.click(); return true; }
+    return false;
+  });
+
+  if (!clicou) {
+    // Fallback: submit ou Enter
+    const submit = await page.$("button[type='submit'], input[type='submit']");
+    if (submit) {
+      await submit.click();
+    } else {
+      await senhaInput.press("Enter");
+    }
   }
 
-  // ── Passo 5: aguarda navegação ───────────────────────────────────
-  console.log("[Scraper] Passo 5: Aguardando navegação...");
-  await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
+  // ── Passo 6: aguarda navegação ───────────────────────────────────
+  console.log("[Scraper] Aguardando navegação após login...");
+  await page
+    .waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 })
+    .catch(() => {});
   await sleep(3000);
 
-  // ── Passo 6: verifica se logou ───────────────────────────────────
+  // ── Passo 7: verifica se logou ───────────────────────────────────
   const url = page.url();
   console.log("[Scraper] URL após login:", url);
 
@@ -124,7 +145,9 @@ async function listarTarefas(page) {
       ".tarefa, [class*='tarefa'], [class*='task'], .atividade, article, .card",
       { timeout: 15000 }
     )
-    .catch(() => console.warn("[Scraper] Seletor de tarefa não encontrado, tentando assim mesmo..."));
+    .catch(() =>
+      console.warn("[Scraper] Seletor de tarefa não encontrado, tentando assim mesmo...")
+    );
 
   await sleep(2000);
 
@@ -151,7 +174,9 @@ async function listarTarefas(page) {
       const titulo = (
         el.querySelector("h1,h2,h3,h4,strong,b")?.innerText ||
         texto.split("\n")[0]
-      ).trim().substring(0, 120);
+      )
+        .trim()
+        .substring(0, 120);
 
       const elText = el.innerText.toLowerCase();
       let status = "pendente";
@@ -255,7 +280,7 @@ async function extrairQuestoes(browser, url) {
   return questoes;
 }
 
-// ─── Responde uma questão (com delay de 7 min antes de enviar) ────────
+// ─── Responde uma questão ─────────────────────────────────────────────
 async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -274,8 +299,6 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
 
   await sleep(2000);
 
-  // ── Seleciona a alternativa ou preenche o campo ──────────────────
-  console.log(`[Scraper] Selecionando resposta: "${resposta}"...`);
   const selecionou = await page.evaluate(
     (numQ, resp) => {
       const blocos = [
@@ -318,12 +341,10 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
     return false;
   }
 
-  // ── Aguarda antes de enviar (comportamento humano) ───────────────
   const minutos = Math.floor(DELAY_ANTES_ENVIAR / 60000);
   console.log(`[Scraper] Aguardando ${minutos} minutos antes de enviar...`);
   await sleep(DELAY_ANTES_ENVIAR);
 
-  // ── Clica em salvar/enviar ───────────────────────────────────────
   console.log("[Scraper] Enviando resposta...");
   await page.evaluate(() => {
     const btns = [
