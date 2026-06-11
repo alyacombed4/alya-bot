@@ -32,7 +32,7 @@ require("./systems/comandos")(client);
 require("./systems/uno")(client);
 require("./systems/ia")(client);
 require("./systems/Kahoot").setup(client);
-require("./systems/Tarefas").setup(client);
+
 
 client.once("clientReady", () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
