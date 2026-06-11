@@ -34,6 +34,7 @@ require("./systems/ia")(client);
 require("./systems/Kahoot").setup(client);
 
 
+
 client.once("clientReady", () => {
   console.log(`✅ Bot online como ${client.user.tag}`);
 });
