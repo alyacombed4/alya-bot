@@ -4,7 +4,8 @@
   "description": "Bot Alya com logs, backup, voz e sons aleatórios",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "postinstall": "playwright install chromium"
   },
   "dependencies": {
     "@discordjs/voice": "^0.19.2",
