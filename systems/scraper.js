@@ -1,29 +1,24 @@
 const puppeteer = require("puppeteer");
 
 const BASE_URL = "https://saladofuturo.educacao.sp.gov.br";
+const DELAY_ANTES_ENVIAR = 7 * 60 * 1000; // 7 minutos
 
-// ─── Detecta o executável do Chromium no sistema ─────────────────────
-function getChromiumPath() {
-  const fs = require("fs");
-  const caminhos = [
-    "/usr/bin/chromium",
-    "/usr/bin/chromium-browser",
-    "/usr/bin/google-chrome",
-    "/usr/bin/google-chrome-stable",
-    "/snap/bin/chromium",
-  ];
-  for (const c of caminhos) {
-    if (fs.existsSync(c)) return c;
-  }
-  return null; // puppeteer usa o próprio bundled
+// ─── Sleep helper ─────────────────────────────────────────────────────
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-// ─── Abre browser e loga na conta ────────────────────────────────────
-async function login(ra, senha) {
-  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || getChromiumPath();
+// ─── Lança o browser ─────────────────────────────────────────────────
+async function launchBrowser() {
+  const executablePath =
+    process.env.PUPPETEER_EXECUTABLE_PATH ||
+    "/run/current-system/sw/bin/chromium";
 
-  const launchOptions = {
+  console.log("[Scraper] Usando Chromium:", executablePath);
+
+  return puppeteer.launch({
     headless: true,
+    executablePath,
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -33,68 +28,105 @@ async function login(ra, senha) {
       "--no-zygote",
       "--single-process",
       "--disable-extensions",
-      "--disable-background-networking",
     ],
-  };
+  });
+}
 
-  if (executablePath) {
-    launchOptions.executablePath = executablePath;
-    console.log("[Scraper] Usando Chromium:", executablePath);
-  }
-
-  const browser = await puppeteer.launch(launchOptions);
-
+// ─── Login ────────────────────────────────────────────────────────────
+async function login(ra, senha) {
+  const browser = await launchBrowser();
   const page = await browser.newPage();
+
   await page.setViewport({ width: 1280, height: 800 });
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
   );
 
-  console.log("[Scraper] Abrindo login...");
-  await page.goto(`${BASE_URL}/login`, { waitUntil: "networkidle2", timeout: 30000 });
+  // ── Passo 1: abre página de login ────────────────────────────────
+  console.log("[Scraper] Passo 1: Abrindo página de login...");
+  await page.goto(`${BASE_URL}/login-alunos`, {
+    waitUntil: "networkidle2",
+    timeout: 40000,
+  });
+  await sleep(3000);
 
-  // Preenche RA e senha
-  await page.waitForSelector("input[name='ra'], input[id='ra'], input[placeholder*='RA']", { timeout: 10000 });
-  const raInput = await page.$("input[name='ra'], input[id='ra'], input[placeholder*='RA'], input[type='text']");
+  // ── Passo 2: preenche RA ─────────────────────────────────────────
+  console.log("[Scraper] Passo 2: Preenchendo RA...");
+  const raSelector = "input[name='ra'], input[id='ra'], input[placeholder*='RA'], input[placeholder*='ra'], input[type='text']";
+  await page.waitForSelector(raSelector, { timeout: 15000 });
+  const raInput = await page.$(raSelector);
   if (!raInput) {
     await browser.close();
-    throw new Error("Campo de RA não encontrado na página de login.");
+    throw new Error("Campo de RA não encontrado.");
   }
   await raInput.click({ clickCount: 3 });
-  await raInput.type(String(ra), { delay: 50 });
+  await sleep(500);
+  await raInput.type(String(ra), { delay: 80 });
+  await sleep(1000);
 
+  // ── Passo 3: preenche senha ──────────────────────────────────────
+  console.log("[Scraper] Passo 3: Preenchendo senha...");
   const senhaInput = await page.$("input[type='password']");
   if (!senhaInput) {
     await browser.close();
-    throw new Error("Campo de senha não encontrado na página de login.");
+    throw new Error("Campo de senha não encontrado.");
   }
   await senhaInput.click({ clickCount: 3 });
-  await senhaInput.type(String(senha), { delay: 50 });
+  await sleep(500);
+  await senhaInput.type(String(senha), { delay: 80 });
+  await sleep(1500);
 
-  // Submete
-  await Promise.all([
-    page.keyboard.press("Enter"),
-    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 20000 }),
-  ]);
+  // ── Passo 4: clica no botão de login ────────────────────────────
+  console.log("[Scraper] Passo 4: Clicando em entrar...");
+  const botaoLogin = await page.$(
+    "button[type='submit'], input[type='submit'], button"
+  );
+  if (botaoLogin) {
+    await botaoLogin.click();
+  } else {
+    await page.keyboard.press("Enter");
+  }
 
-  // Checa se logou
+  // ── Passo 5: aguarda navegação ───────────────────────────────────
+  console.log("[Scraper] Passo 5: Aguardando navegação...");
+  await page.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => {});
+  await sleep(3000);
+
+  // ── Passo 6: verifica se logou ───────────────────────────────────
   const url = page.url();
-  if (url.includes("login") || url.includes("erro") || url.includes("error")) {
+  console.log("[Scraper] URL após login:", url);
+
+  if (
+    url.includes("login") ||
+    url.includes("erro") ||
+    url.includes("error") ||
+    url.includes("401")
+  ) {
     await browser.close();
     throw new Error("RA ou senha incorretos. Verifique e tente novamente.");
   }
 
-  console.log("[Scraper] Login bem-sucedido. URL:", url);
+  console.log("[Scraper] Login bem-sucedido!");
   return { browser, page };
 }
 
-// ─── Lista tarefas (pendentes + expiradas) ───────────────────────────
+// ─── Lista tarefas ────────────────────────────────────────────────────
 async function listarTarefas(page) {
-  await page.goto(`${BASE_URL}/tarefas`, { waitUntil: "networkidle2", timeout: 20000 });
+  console.log("[Scraper] Navegando para tarefas...");
+  await page.goto(`${BASE_URL}/tarefas`, {
+    waitUntil: "networkidle2",
+    timeout: 30000,
+  });
+  await sleep(4000);
 
   await page
-    .waitForSelector(".tarefa, [class*='tarefa'], [class*='task'], .atividade", { timeout: 15000 })
-    .catch(() => console.warn("[Scraper] Seletor padrão não encontrado, tentando fallback..."));
+    .waitForSelector(
+      ".tarefa, [class*='tarefa'], [class*='task'], .atividade, article, .card",
+      { timeout: 15000 }
+    )
+    .catch(() => console.warn("[Scraper] Seletor de tarefa não encontrado, tentando assim mesmo..."));
+
+  await sleep(2000);
 
   const tarefas = await page.evaluate(() => {
     const itens = [];
@@ -123,9 +155,17 @@ async function listarTarefas(page) {
 
       const elText = el.innerText.toLowerCase();
       let status = "pendente";
-      if (elText.includes("expirad") || elText.includes("encerrad") || elText.includes("vencid")) {
+      if (
+        elText.includes("expirad") ||
+        elText.includes("encerrad") ||
+        elText.includes("vencid")
+      ) {
         status = "expirada";
-      } else if (elText.includes("entregue") || elText.includes("concluíd") || elText.includes("enviada")) {
+      } else if (
+        elText.includes("entregue") ||
+        elText.includes("concluíd") ||
+        elText.includes("enviada")
+      ) {
         status = "entregue";
       }
 
@@ -138,10 +178,11 @@ async function listarTarefas(page) {
     return itens;
   });
 
+  console.log(`[Scraper] ${tarefas.length} tarefa(s) encontrada(s).`);
   return tarefas;
 }
 
-// ─── Abre uma tarefa e extrai as questões ───────────────────────────
+// ─── Extrai questões de uma tarefa ────────────────────────────────────
 async function extrairQuestoes(browser, url) {
   const page = await browser.newPage();
   await page.setUserAgent(
@@ -149,7 +190,8 @@ async function extrairQuestoes(browser, url) {
   );
 
   console.log("[Scraper] Abrindo tarefa:", url);
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 25000 });
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+  await sleep(4000);
 
   await page
     .waitForSelector(
@@ -157,6 +199,8 @@ async function extrairQuestoes(browser, url) {
       { timeout: 15000 }
     )
     .catch(() => console.warn("[Scraper] Seletor de questão não encontrado"));
+
+  await sleep(2000);
 
   const questoes = await page.evaluate(() => {
     const resultado = [];
@@ -187,7 +231,6 @@ async function extrairQuestoes(browser, url) {
       }
 
       const tipo = alternativas.length > 0 ? "multipla_escolha" : "dissertativa";
-
       const img = bloco.querySelector("img");
       const imagem = img?.src || null;
 
@@ -207,27 +250,38 @@ async function extrairQuestoes(browser, url) {
     return resultado;
   });
 
+  console.log(`[Scraper] ${questoes.length} questão(ões) encontrada(s).`);
   await page.close();
   return questoes;
 }
 
-// ─── Submete resposta numa questão ──────────────────────────────────
+// ─── Responde uma questão (com delay de 7 min antes de enviar) ────────
 async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
   const page = await browser.newPage();
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
   );
 
-  await page.goto(tarefaUrl, { waitUntil: "networkidle2", timeout: 25000 });
+  console.log(`[Scraper] Abrindo tarefa para responder questão ${questaoNumero}...`);
+  await page.goto(tarefaUrl, { waitUntil: "networkidle2", timeout: 30000 });
+  await sleep(4000);
 
   await page
-    .waitForSelector(".questao, [class*='questao'], [class*='question']", { timeout: 15000 })
+    .waitForSelector(".questao, [class*='questao'], [class*='question']", {
+      timeout: 15000,
+    })
     .catch(() => {});
 
-  const sucesso = await page.evaluate(
+  await sleep(2000);
+
+  // ── Seleciona a alternativa ou preenche o campo ──────────────────
+  console.log(`[Scraper] Selecionando resposta: "${resposta}"...`);
+  const selecionou = await page.evaluate(
     (numQ, resp) => {
       const blocos = [
-        ...document.querySelectorAll(".questao, [class*='questao'], [class*='question']"),
+        ...document.querySelectorAll(
+          ".questao, [class*='questao'], [class*='question']"
+        ),
       ];
 
       const bloco = blocos[numQ - 1];
@@ -258,23 +312,40 @@ async function responderQuestao(browser, tarefaUrl, questaoNumero, resposta) {
     resposta
   );
 
-  if (sucesso) {
-    await page.evaluate(() => {
-      const btns = [...document.querySelectorAll("button, [class*='btn'], [class*='salvar'], [class*='enviar']")];
-      const salvar = btns.find(
-        (b) =>
-          b.innerText?.toLowerCase().includes("salvar") ||
-          b.innerText?.toLowerCase().includes("enviar") ||
-          b.innerText?.toLowerCase().includes("próxima") ||
-          b.innerText?.toLowerCase().includes("confirmar")
-      );
-      salvar?.click();
-    });
-    await new Promise((r) => setTimeout(r, 2000));
+  if (!selecionou) {
+    console.warn("[Scraper] Não conseguiu selecionar a resposta.");
+    await page.close();
+    return false;
   }
 
+  // ── Aguarda antes de enviar (comportamento humano) ───────────────
+  const minutos = Math.floor(DELAY_ANTES_ENVIAR / 60000);
+  console.log(`[Scraper] Aguardando ${minutos} minutos antes de enviar...`);
+  await sleep(DELAY_ANTES_ENVIAR);
+
+  // ── Clica em salvar/enviar ───────────────────────────────────────
+  console.log("[Scraper] Enviando resposta...");
+  await page.evaluate(() => {
+    const btns = [
+      ...document.querySelectorAll(
+        "button, [class*='btn'], [class*='salvar'], [class*='enviar']"
+      ),
+    ];
+    const salvar = btns.find(
+      (b) =>
+        b.innerText?.toLowerCase().includes("salvar") ||
+        b.innerText?.toLowerCase().includes("enviar") ||
+        b.innerText?.toLowerCase().includes("próxima") ||
+        b.innerText?.toLowerCase().includes("confirmar")
+    );
+    salvar?.click();
+  });
+
+  await sleep(3000);
+  console.log("[Scraper] Resposta enviada!");
+
   await page.close();
-  return sucesso;
+  return true;
 }
 
 module.exports = { login, listarTarefas, extrairQuestoes, responderQuestao };
