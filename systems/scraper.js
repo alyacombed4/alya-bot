@@ -2,9 +2,27 @@ const puppeteer = require("puppeteer");
 
 const BASE_URL = "https://saladofuturo.educacao.sp.gov.br";
 
+// ─── Detecta o executável do Chromium no sistema ─────────────────────
+function getChromiumPath() {
+  const fs = require("fs");
+  const caminhos = [
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+    "/snap/bin/chromium",
+  ];
+  for (const c of caminhos) {
+    if (fs.existsSync(c)) return c;
+  }
+  return null; // puppeteer usa o próprio bundled
+}
+
 // ─── Abre browser e loga na conta ────────────────────────────────────
 async function login(ra, senha) {
-  const browser = await puppeteer.launch({
+  const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || getChromiumPath();
+
+  const launchOptions = {
     headless: true,
     args: [
       "--no-sandbox",
@@ -14,8 +32,17 @@ async function login(ra, senha) {
       "--no-first-run",
       "--no-zygote",
       "--single-process",
+      "--disable-extensions",
+      "--disable-background-networking",
     ],
-  });
+  };
+
+  if (executablePath) {
+    launchOptions.executablePath = executablePath;
+    console.log("[Scraper] Usando Chromium:", executablePath);
+  }
+
+  const browser = await puppeteer.launch(launchOptions);
 
   const page = await browser.newPage();
   await page.setViewport({ width: 1280, height: 800 });
