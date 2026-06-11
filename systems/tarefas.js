@@ -1,5 +1,4 @@
-const {
-  ActionRowBuilder,
+const { ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
   ModalBuilder,
@@ -10,9 +9,49 @@ const {
   StringSelectMenuOptionBuilder,
 } = require("discord.js");
 
-const { jfetch } = require("./http.js");
-const { SED, EDUSP: EDUSP_BASE } = require("./config.js");
-const { getSedKey, invalidateSedKey } = require("./sed-key.js");
+// ─────────────────────────────────────────────
+// CONFIG / HTTP / CHAVE DA APIM (tudo local, sem deps externas)
+// ─────────────────────────────────────────────
+const SED = "https://sedintegracoes.educacao.sp.gov.br";
+const EDUSP_BASE = "https://edusp-api.ip.tv";
+
+// Chave pública da APIM usada pelo app oficial do Sala do Futuro.
+// Se parar de funcionar (401/403), troque o valor abaixo — pegue
+// inspecionando o tráfego do app/site em DevTools → Network,
+// header "Ocp-Apim-Subscription-Key".
+let SED_APIM_KEY = "1cd3a0cc88c54aa9bf2a338806f0c813";
+
+async function getSedKey() {
+  return SED_APIM_KEY;
+}
+
+async function invalidateSedKey() {
+  // Não há descoberta automática configurada; apenas loga o aviso.
+  console.warn(
+    "⚠️ Chave da APIM da SED parece inválida. Atualize SED_APIM_KEY em tarefas.js."
+  );
+}
+
+// fetch genérico que já faz parse de JSON e lança erro com .status
+async function jfetch(url, options = {}) {
+  const res = await fetch(url, options);
+  const ct = res.headers.get("content-type") || "";
+  const data = ct.includes("application/json")
+    ? await res.json().catch(() => null)
+    : await res.text().catch(() => "");
+
+  if (!res.ok) {
+    const err = new Error(
+      `HTTP ${res.status} em ${url}: ${
+        typeof data === "string" ? data.slice(0, 300) : JSON.stringify(data).slice(0, 300)
+      }`
+    );
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
 
 // ─────────────────────────────────────────────
 // AUTENTICAÇÃO SED (RA + dígito + UF + senha) → token EDUSP
