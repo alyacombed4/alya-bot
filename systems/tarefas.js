@@ -10,10 +10,125 @@ const {
   StringSelectMenuOptionBuilder,
 } = require("discord.js");
 
+const { jfetch } = require("./http.js");
+const { SED, EDUSP: EDUSP_BASE } = require("./config.js");
+const { getSedKey, invalidateSedKey } = require("./sed-key.js");
+
 // ─────────────────────────────────────────────
-// CONSTANTES DA API
-// Rotas descobertas via DevTools (Network) no app/site CMSP.
-// Se mudar, ajuste aqui — não precisa mexer no resto do código.
+// AUTENTICAÇÃO SED (RA + dígito + UF + senha) → token EDUSP
+// ─────────────────────────────────────────────
+function sedHeaders(apimKey, extra = {}) {
+  return {
+    "content-type": "application/json",
+    "accept": "application/json, text/plain, */*",
+    "ocp-apim-subscription-key": apimKey,
+    "x-product-name": "SalaDoFuturo",
+    ...extra,
+  };
+}
+
+// monta o "user" no formato que a SED espera: RA + dígito + UF, tudo junto e maiúsculo.
+// ex.: ra=123456789 dg=X uf=sp -> "123456789XSP"
+function montarUser(ra, dg, uf) {
+  return `${String(ra).trim()}${String(dg || "").trim()}${String(uf || "").trim()}`.toUpperCase();
+}
+
+// passo 1: autentica no SED (BFF do Sala do Futuro), cai pro legado se 404.
+// usa a chave da APIM descoberta do app oficial; se tomar 401/403 (chave
+// rotacionada), invalida o cache, re-descobre e tenta de novo uma vez.
+async function sedLogin(user, password, _retry = true) {
+  const paths = [
+    "/saladofuturobffapi/credenciais/api/LoginCompletoToken",
+    "/credenciais/api/LoginCompletoToken",
+  ];
+
+  const apimKey = await getSedKey();
+
+  let ultimoErro = null;
+  for (const path of paths) {
+    try {
+      const resp = await jfetch(`${SED}${path}`, {
+        method: "POST",
+        headers: sedHeaders(apimKey),
+        body: JSON.stringify({ user, senha: password }),
+      });
+
+      const token =
+        resp?.token ||
+        resp?.access_token ||
+        resp?.accessToken ||
+        resp?.data?.token ||
+        resp?.data?.access_token;
+
+      if (!token) {
+        throw new Error(`Resposta sem token: ${JSON.stringify(resp).slice(0, 200)}`);
+      }
+
+      return { sedToken: token, raw: resp };
+    } catch (err) {
+      const status = err.status || 0;
+
+      // chave da APIM expirada/rotacionada -> re-descobre uma vez e tenta de novo
+      if ((status === 401 || status === 403) && _retry) {
+        await invalidateSedKey();
+        return sedLogin(user, password, false);
+      }
+
+      // senha incorreta
+      if (status === 401 || status === 403) {
+        throw new Error("RA, dígito, UF ou senha incorretos.");
+      }
+
+      // 404 -> tenta o próximo path
+      if (status === 404) {
+        ultimoErro = err;
+        continue;
+      }
+
+      ultimoErro = err;
+    }
+  }
+
+  throw new Error(`Falha ao autenticar na SED: ${ultimoErro?.message}`);
+}
+
+// passo 2: troca o token da SED por um token de sessão da EDUSP (ip.tv),
+// que é o que a API de tarefas/questões do Sala do Futuro aceita.
+async function edusToken(sedToken) {
+  const resp = await jfetch(`${EDUSP_BASE}/registration/edusp/token`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "accept": "application/json, text/plain, */*",
+      "x-api-realm": "edusp",
+      "x-api-platform": "webclient",
+    },
+    body: JSON.stringify({ token: sedToken }),
+  });
+
+  const token =
+    resp?.auth_token ||
+    resp?.token ||
+    resp?.access_token ||
+    resp?.data?.auth_token;
+
+  if (!token) {
+    throw new Error(`Token EDUSP não encontrado na resposta: ${JSON.stringify(resp).slice(0, 200)}`);
+  }
+
+  return token;
+}
+
+// fluxo completo: RA + dígito + UF + senha -> token pronto para chamar a EDUSP
+async function autenticarAluno(ra, dg, uf, senha) {
+  const user = montarUser(ra, dg, uf);
+  const { sedToken } = await sedLogin(user, senha);
+  const token = await edusToken(sedToken);
+  return { token, user };
+}
+
+// ─────────────────────────────────────────────
+// CONSTANTES DA API EDUSP (tarefas/questões)
 // ─────────────────────────────────────────────
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
@@ -21,49 +136,30 @@ const UA =
 
 const CACHE_TTL = 1000 * 60 * 60 * 6; // 6 h
 
-const EDUSP  = "https://edusp-api.ip.tv";
-const SED    = "https://sedintegracoes.educacao.sp.gov.br";
+const EDUSP = "https://edusp-api.ip.tv";
 
-// ── Rotas conhecidas ──────────────────────────
-// Inspecione o tráfego em https://cmspweb.ip.tv com DevTools → Network
-// e ajuste qualquer rota abaixo que retornar 404.
+// Rotas conhecidas da EDUSP — ajuste aqui se mudar (DevTools → Network em cmspweb.ip.tv)
 const ROTAS = {
-  // Login do aluno — tenta cada uma em ordem até obter sucesso
-  loginAluno: [
-    // Rota mais provável (CMSP / ip.tv)
-    { url: `${EDUSP}/api/user/login`,            body: (ra, s) => ({ login: ra, password: s, type: "student" }) },
-    { url: `${EDUSP}/api/user/login`,            body: (ra, s) => ({ ra, password: s }) },
-    // SED integracoes — variações de campo
-    { url: `${SED}/autenticacao/login`,          body: (ra, s) => ({ login: ra, senha: s, tipo: "aluno" }) },
-    { url: `${SED}/v1/autenticacao/login`,       body: (ra, s) => ({ login: ra, senha: s } ) },
-    { url: `${SED}/api/v1/auth/login`,           body: (ra, s) => ({ username: ra, password: s }) },
-    { url: `${SED}/api/autenticacao`,            body: (ra, s) => ({ login: ra, senha: s }) },
-  ],
-  // Tarefas do aluno
   tarefas: [
     `${EDUSP}/api/student/tasks`,
     `${EDUSP}/api/tarefas`,
     `${EDUSP}/api/atividades`,
   ],
-  // Questões de uma tarefa (:id será substituído)
   questoes: [
     `${EDUSP}/api/student/tasks/:id/questions`,
     `${EDUSP}/api/tarefas/:id/questoes`,
     `${EDUSP}/api/atividades/:id/questoes`,
   ],
-  // Responder questão
   responder: `${EDUSP}/api/student/tasks/:tarefaId/questions/:questaoId/answer`,
-  // Finalizar tarefa
   finalizar: `${EDUSP}/api/student/tasks/:id/submit`,
 };
 
-// Armazena sessões ativas por usuário
+// Sessões ativas por usuário e cache de tarefas
 const sessoes = new Map();
-// Cache de tarefas: userId → { data, fetchedAt }
 const tarefasCache = new Map();
 
 // ─────────────────────────────────────────────
-// CLIENTE HTTP CENTRALIZADO
+// CLIENTE HTTP CENTRALIZADO (EDUSP)
 // ─────────────────────────────────────────────
 async function apiFetch(url, options = {}) {
   const headers = {
@@ -79,58 +175,6 @@ async function apiFetch(url, options = {}) {
   }
   const ct = res.headers.get("content-type") || "";
   return ct.includes("application/json") ? res.json() : res.text();
-}
-
-// ─────────────────────────────────────────────
-// AUTENTICAÇÃO — tenta cada rota de login em sequência
-// ─────────────────────────────────────────────
-async function autenticarAluno(ra, senha) {
-  let ultimoErro = null;
-
-  for (const rota of ROTAS.loginAluno) {
-    try {
-      const resp = await apiFetch(rota.url, {
-        method: "POST",
-        body: JSON.stringify(rota.body(ra, senha)),
-      });
-
-      // Aceita vários formatos de resposta
-      const token =
-        resp?.token        ||
-        resp?.access_token ||
-        resp?.accessToken  ||
-        resp?.data?.token  ||
-        resp?.data?.access_token;
-
-      if (token) {
-        console.log(`✅ Login OK via ${rota.url}`);
-        return { token, rota: rota.url };
-      }
-
-      // Alguns retornam 200 mas com flag de erro
-      if (resp?.success === false || resp?.error) {
-        throw new Error(resp?.message || resp?.error || "Credenciais inválidas");
-      }
-
-      // Resposta 200 sem token reconhecível
-      throw new Error(`Resposta inesperada: ${JSON.stringify(resp).slice(0, 200)}`);
-
-    } catch (err) {
-      const msg = err.message || "";
-      // 401/403 = senha errada → para imediatamente
-      if (msg.includes("401") || msg.includes("403") || msg.includes("Credenciais")) {
-        throw new Error("RA ou senha incorretos.");
-      }
-      // 404/500 = rota errada → tenta a próxima
-      ultimoErro = err;
-      console.warn(`⚠️ Rota ${rota.url} falhou: ${msg}`);
-    }
-  }
-
-  throw new Error(
-    `Nenhuma rota de login funcionou. Último erro: ${ultimoErro?.message}\n` +
-    `Inspecione o tráfego em cmspweb.ip.tv e ajuste ROTAS.loginAluno no código.`
-  );
 }
 
 // ─────────────────────────────────────────────
@@ -152,10 +196,10 @@ async function buscarTarefas(token, userId) {
 
       const tarefas = lista.slice(0, 25).map((t, i) => ({
         index: i,
-        id:    t.id || t.taskId || t.tarefaId || String(i),
+        id: t.id || t.taskId || t.tarefaId || String(i),
         titulo: (t.title || t.titulo || t.name || t.nome || `Tarefa ${i + 1}`).slice(0, 100),
         disciplina: t.subject || t.disciplina || t.materia || null,
-        dataLimite:  t.dueDate || t.dataLimite || t.prazo || null,
+        dataLimite: t.dueDate || t.dataLimite || t.prazo || null,
       }));
 
       tarefasCache.set(userId, { data: tarefas, fetchedAt: Date.now() });
@@ -190,7 +234,7 @@ async function buscarQuestoes(token, tarefa) {
         id: q.id || q.questionId || q.questaoId || String(i),
         enunciado: q.statement || q.enunciado || q.text || q.texto || `Questão ${i + 1}`,
         alternativas: (q.alternatives || q.alternativas || q.options || q.opcoes || []).map((a) => ({
-          id:    a.id || a.alternativeId || a.alternativaId || null,
+          id: a.id || a.alternativeId || a.alternativaId || null,
           texto: (a.text || a.texto || a.label || String(a)).trim(),
         })),
       }));
@@ -243,6 +287,18 @@ function embedStatus(titulo, passos) {
     .setTimestamp();
 }
 
+const PASSOS_BASE = [
+  { label: "Inserir RA, dígito, UF e senha", feito: false },
+  { label: "Autenticar na plataforma", feito: false },
+  { label: "Carregar suas tarefas", feito: false },
+  { label: "Você escolhe qual fazer", feito: false },
+  { label: "As questões chegam aqui", feito: false },
+];
+
+function passos(...prontos) {
+  return PASSOS_BASE.map((p, i) => ({ ...p, feito: i < prontos.length ? prontos[i] : false }));
+}
+
 // ─────────────────────────────────────────────
 // MÓDULO PRINCIPAL
 // ─────────────────────────────────────────────
@@ -258,7 +314,7 @@ module.exports = (client) => {
         .setDescription(
           "Acesse suas tarefas da plataforma **Sala do Futuro** diretamente pelo Discord.\n\n" +
             "**Como funciona:**\n" +
-            "⬜  Inserir RA e senha\n" +
+            "⬜  Inserir RA, dígito, UF e senha\n" +
             "⬜  Autenticar na plataforma\n" +
             "⬜  Carregar suas tarefas\n" +
             "⬜  Você escolhe qual fazer\n" +
@@ -311,13 +367,32 @@ module.exports = (client) => {
       const modal = new ModalBuilder()
         .setCustomId("tarefas_modal_login")
         .setTitle("Login — Sala do Futuro");
+
       modal.addComponents(
         new ActionRowBuilder().addComponents(
           new TextInputBuilder()
             .setCustomId("ra")
-            .setLabel("RA (Registro do Aluno)")
+            .setLabel("RA (Registro do Aluno, só números)")
             .setStyle(TextInputStyle.Short)
-            .setPlaceholder("Ex: 123456789SP")
+            .setPlaceholder("Ex: 123456789")
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("dg")
+            .setLabel("Dígito do RA")
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder("Ex: 1 ou X")
+            .setMaxLength(1)
+            .setRequired(true)
+        ),
+        new ActionRowBuilder().addComponents(
+          new TextInputBuilder()
+            .setCustomId("uf")
+            .setLabel("UF")
+            .setStyle(TextInputStyle.Short)
+            .setPlaceholder("Ex: SP")
+            .setMaxLength(2)
             .setRequired(true)
         ),
         new ActionRowBuilder().addComponents(
@@ -335,20 +410,16 @@ module.exports = (client) => {
     // Submit do modal de login
     if (interaction.isModalSubmit() && interaction.customId === "tarefas_modal_login") {
       const ra    = interaction.fields.getTextInputValue("ra").trim();
+      const dg    = interaction.fields.getTextInputValue("dg").trim();
+      const uf    = interaction.fields.getTextInputValue("uf").trim();
       const senha = interaction.fields.getTextInputValue("senha").trim();
 
       await interaction.reply({
-        embeds: [embedStatus("Iniciando sessão...", [
-          { label: "Inserir RA e senha",       feito: true  },
-          { label: "Autenticar na plataforma", feito: false },
-          { label: "Carregar suas tarefas",    feito: false },
-          { label: "Você escolhe qual fazer",  feito: false },
-          { label: "As questões chegam aqui",  feito: false },
-        ])],
+        embeds: [embedStatus("Iniciando sessão...", passos(true))],
         ephemeral: true,
       });
 
-      iniciarSessao(client, interaction, ra, senha);
+      iniciarSessao(client, interaction, ra, dg, uf, senha);
     }
 
     // Seleção de tarefas
@@ -397,28 +468,22 @@ module.exports = (client) => {
 // ─────────────────────────────────────────────
 // INICIAR SESSÃO
 // ─────────────────────────────────────────────
-async function iniciarSessao(client, interaction, ra, senha) {
+async function iniciarSessao(client, interaction, ra, dg, uf, senha) {
   const userId = interaction.user.id;
 
   try {
     // Passo 2: Autenticando
     await interaction.editReply({
-      embeds: [embedStatus("Autenticando na plataforma...", [
-        { label: "Inserir RA e senha",       feito: true  },
-        { label: "Autenticar na plataforma", feito: false },
-        { label: "Carregar suas tarefas",    feito: false },
-        { label: "Você escolhe qual fazer",  feito: false },
-        { label: "As questões chegam aqui",  feito: false },
-      ])],
+      embeds: [embedStatus("Autenticando na plataforma...", passos(true, false))],
     });
 
     let auth;
     try {
-      auth = await autenticarAluno(ra, senha);
+      auth = await autenticarAluno(ra, dg, uf, senha);
     } catch (err) {
       const isCredentials =
-        err.message.includes("RA ou senha") ||
-        err.message.includes("inválidos");
+        err.message.includes("RA, dígito") ||
+        err.message.includes("incorretos");
 
       await interaction.editReply({
         embeds: [new EmbedBuilder()
@@ -426,10 +491,10 @@ async function iniciarSessao(client, interaction, ra, senha) {
           .setTitle("❌ Falha no login")
           .setDescription(
             isCredentials
-              ? "RA ou senha incorretos. Use `!tarefasmsg` para tentar novamente."
+              ? "RA, dígito, UF ou senha incorretos. Use `!tarefasmsg` para tentar novamente."
               : `Erro ao autenticar: \`${err.message}\`\n\n` +
-                "**Dica:** Inspecione o tráfego de rede em `cmspweb.ip.tv` (DevTools → Network) " +
-                "e ajuste `ROTAS.loginAluno` no arquivo `tarefas.js`."
+                "**Dica:** verifique se a chave da APIM/SED ainda é válida " +
+                "(`getSedKey`/`invalidateSedKey` em `sed-key.js`)."
           )
         ],
         components: [],
@@ -441,13 +506,7 @@ async function iniciarSessao(client, interaction, ra, senha) {
 
     // Passo 3: Carregando tarefas
     await interaction.editReply({
-      embeds: [embedStatus("Carregando suas tarefas...", [
-        { label: "Inserir RA e senha",       feito: true  },
-        { label: "Autenticar na plataforma", feito: true  },
-        { label: "Carregar suas tarefas",    feito: false },
-        { label: "Você escolhe qual fazer",  feito: false },
-        { label: "As questões chegam aqui",  feito: false },
-      ])],
+      embeds: [embedStatus("Carregando suas tarefas...", passos(true, true, false))],
     });
 
     const tarefas = await buscarTarefas(token, userId);
@@ -480,13 +539,7 @@ async function iniciarSessao(client, interaction, ra, senha) {
 
     // Passo 4: Usuário escolhe
     await interaction.editReply({
-      embeds: [embedStatus("Tarefas carregadas! Escolha abaixo 👇", [
-        { label: "Inserir RA e senha",       feito: true  },
-        { label: "Autenticar na plataforma", feito: true  },
-        { label: "Carregar suas tarefas",    feito: true  },
-        { label: "Você escolhe qual fazer",  feito: false },
-        { label: "As questões chegam aqui",  feito: false },
-      ])],
+      embeds: [embedStatus("Tarefas carregadas! Escolha abaixo 👇", passos(true, true, true))],
       components: [
         new ActionRowBuilder().addComponents(
           new StringSelectMenuBuilder()
@@ -586,8 +639,8 @@ async function processarTarefas(client, user, sessao) {
 
         await new Promise((resolve) => {
           sessao.aguardandoResposta = true;
-          sessao.questaoAtual  = questao;
-          sessao.alternativas  = questao.alternativas;
+          sessao.questaoAtual = questao;
+          sessao.alternativas = questao.alternativas;
 
           sessao.resolverQuestao = async (alt) => {
             try {
