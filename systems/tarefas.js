@@ -47,9 +47,52 @@ async function jfetch(url, options = {}) {
       }`
     );
     err.status = res.status;
+    err.raw = data;
     throw err;
   }
   return data;
+}
+
+// ─────────────────────────────────────────────
+// DEBUG — manda detalhes do erro de login pro admin via DM
+// ─────────────────────────────────────────────
+const ADMIN_ID = "SEU_ID_AQUI"; // <- coloque seu user ID do Discord aqui
+
+async function enviarDebugLogin(client, { ra, dg, uf, err }) {
+  if (!ADMIN_ID || ADMIN_ID === "SEU_ID_AQUI") return;
+
+  try {
+    const admin = await client.users.fetch(ADMIN_ID);
+
+    const rawStr =
+      typeof err.raw === "string"
+        ? err.raw
+        : err.raw
+        ? JSON.stringify(err.raw, null, 2)
+        : "(sem corpo de resposta)";
+
+    const embed = new EmbedBuilder()
+      .setColor(0xe74c3c)
+      .setTitle("🐛 Debug — Falha no login (Sala do Futuro)")
+      .addFields(
+        { name: "user (RA+dígito+UF)", value: `\`${montarUser(ra, dg, uf)}\`` },
+        { name: "Status HTTP", value: `\`${err.status || "?"}\`` },
+        { name: "Mensagem", value: `\`${err.message.slice(0, 1000)}\`` }
+      )
+      .setTimestamp();
+
+    await admin.send({ embeds: [embed] });
+
+    // se a resposta for grande, manda também como arquivo
+    if (rawStr.length > 50) {
+      const buffer = Buffer.from(rawStr, "utf-8");
+      await admin.send({
+        files: [{ attachment: buffer, name: "resposta_sed.json" }],
+      });
+    }
+  } catch (e) {
+    console.warn(`⚠️ Não consegui enviar debug pro admin: ${e.message}`);
+  }
 }
 
 
@@ -523,6 +566,8 @@ async function iniciarSessao(client, interaction, ra, dg, uf, senha) {
       const isCredentials =
         err.message.includes("RA, dígito") ||
         err.message.includes("incorretos");
+
+      await enviarDebugLogin(client, { ra, dg, uf, err });
 
       await interaction.editReply({
         embeds: [new EmbedBuilder()
