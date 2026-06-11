@@ -56,10 +56,10 @@ async function jfetch(url, options = {}) {
 // ─────────────────────────────────────────────
 // DEBUG — manda detalhes do erro de login pro admin via DM
 // ─────────────────────────────────────────────
-const ADMIN_ID = "SEU_ID_AQUI"; // <- coloque seu user ID do Discord aqui
+const ADMIN_ID = "1372615579407618209"; // <- coloque seu user ID do Discord aqui
 
 async function enviarDebugLogin(client, { ra, dg, uf, err }) {
-  if (!ADMIN_ID || ADMIN_ID === "SEU_ID_AQUI") return;
+  if (!ADMIN_ID || ADMIN_ID === "1372615579407618209") return;
 
   try {
     const admin = await client.users.fetch(ADMIN_ID);
