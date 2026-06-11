@@ -15,21 +15,68 @@ const { ActionRowBuilder,
 const SED = "https://sedintegracoes.educacao.sp.gov.br";
 const EDUSP_BASE = "https://edusp-api.ip.tv";
 
-// Chave pública da APIM usada pelo app oficial do Sala do Futuro.
-// Se parar de funcionar (401/403), troque o valor abaixo — pegue
-// inspecionando o tráfego do app/site em DevTools → Network,
-// header "Ocp-Apim-Subscription-Key".
-let SED_APIM_KEY = "1cd3a0cc88c54aa9bf2a338806f0c813";
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-async function getSedKey() {
-  return SED_APIM_KEY;
+// ─────────────────────────────────────────────
+// AUTO-DESCOBERTA DA CHAVE DA APIM (api_key_bff)
+// A SED rotaciona essa chave de tempos em tempos. Em vez de capturar no
+// DevTools toda vez, lemos direto do bundle JS do app oficial do Sala do
+// Futuro. No bundle ela vem dentro de um bloco de config:
+//   "api_key_bff":"<32 hex>","api_url_bff":"https://sedintegracoes.../saladofuturobffapi"
+// (as aspas chegam escapadas como \x22)
+// ─────────────────────────────────────────────
+const SF_BASE = "https://saladofuturo.educacao.sp.gov.br";
+
+// chave de fallback, usada se a auto-descoberta falhar (ex.: site fora do ar)
+const SED_APIM_KEY_FALLBACK = "1cd3a0cc88c54aa9bf2a338806f0c813";
+
+const SED_KEY_CACHE_TTL = 1000 * 60 * 60 * 6; // revalida a cada 6h
+let sedKeyCache = { key: null, ts: 0 };
+
+// extrai a chave do app oficial. devolve a string de 32 hex ou lança.
+async function fetchSedKeyFromApp() {
+  // 1) home -> acha o bundle app.<hash>.js
+  const html = await (await fetch(`${SF_BASE}/`, { headers: { "user-agent": UA } })).text();
+  const bm = html.match(/\/js\/app\.[a-f0-9]+\.js/);
+  if (!bm) throw new Error("bundle app.js não encontrado no HTML da SED");
+
+  // 2) baixa o bundle e desescapa o \x22 -> "
+  const js = await (await fetch(`${SF_BASE}${bm[0]}`, { headers: { "user-agent": UA } })).text();
+  const un = js.replace(/\\x22/g, '"');
+
+  // 3) extrai api_key_bff
+  const km = un.match(/"api_key_bff"\s*:\s*"([a-f0-9]{32})"/);
+  if (!km) throw new Error("api_key_bff não encontrada no bundle");
+  return km[1];
 }
 
+// devolve a chave atual da SED.
+// ordem: cache válido -> bundle oficial -> chave de fallback acima.
+// nunca lança: se a descoberta falhar, cai no fallback.
+async function getSedKey() {
+  const agora = Date.now();
+  if (sedKeyCache.key && agora - sedKeyCache.ts < SED_KEY_CACHE_TTL) return sedKeyCache.key;
+
+  try {
+    const key = await fetchSedKeyFromApp();
+    if (key !== sedKeyCache.key) {
+      console.log(`🔑 Chave da APIM SED atualizada: ...${key.slice(-6)}`);
+    }
+    sedKeyCache = { key, ts: agora };
+    return key;
+  } catch (e) {
+    console.warn(`⚠️ Auto-fetch da chave SED falhou (${e.message}); usando fallback`);
+    sedKeyCache = { key: SED_APIM_KEY_FALLBACK, ts: agora - SED_KEY_CACHE_TTL + 60_000 };
+    return SED_APIM_KEY_FALLBACK;
+  }
+}
+
+// força revalidação (ex.: se um login falhar com 401/403)
 async function invalidateSedKey() {
-  // Não há descoberta automática configurada; apenas loga o aviso.
-  console.warn(
-    "⚠️ Chave da APIM da SED parece inválida. Atualize SED_APIM_KEY em tarefas.js."
-  );
+  sedKeyCache = { key: null, ts: 0 };
+  console.warn("⚠️ Chave da APIM da SED invalidada, será re-descoberta na próxima tentativa.");
 }
 
 // fetch genérico que já faz parse de JSON e lança erro com .status
@@ -56,10 +103,10 @@ async function jfetch(url, options = {}) {
 // ─────────────────────────────────────────────
 // DEBUG — manda detalhes do erro de login pro admin via DM
 // ─────────────────────────────────────────────
-const ADMIN_ID = "1372615579407618209"; // <- coloque seu user ID do Discord aqui
+const ADMIN_ID = "SEU_ID_AQUI"; // <- coloque seu user ID do Discord aqui
 
 async function enviarDebugLogin(client, { ra, dg, uf, err }) {
-  if (!ADMIN_ID || ADMIN_ID === "1372615579407618209") return;
+  if (!ADMIN_ID || ADMIN_ID === "SEU_ID_AQUI") return;
 
   try {
     const admin = await client.users.fetch(ADMIN_ID);
@@ -212,10 +259,6 @@ async function autenticarAluno(ra, dg, uf, senha) {
 // ─────────────────────────────────────────────
 // CONSTANTES DA API EDUSP (tarefas/questões)
 // ─────────────────────────────────────────────
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-  "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-
 const CACHE_TTL = 1000 * 60 * 60 * 6; // 6 h
 
 const EDUSP = "https://edusp-api.ip.tv";
