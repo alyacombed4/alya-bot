@@ -169,6 +169,7 @@ module.exports = (client) => {
         "1510702157677072635",
         "1403155779552284693",
         "1507815371523100865",
+        "1484716169544863804",
     ];
 
     // ── Função: montar e enviar mensagem com imagem para Groq Vision ──────────
