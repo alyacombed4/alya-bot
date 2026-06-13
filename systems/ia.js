@@ -168,7 +168,7 @@ Expert-level proficiency in:
 - DRY but not obsessively - sometimes repetition is clearer
 - YAGNI - build what's needed now, not what might be needed later
 - Write functions that do one thing well
-- Name things clearly - `getUserById` not `get` or `fetch`
+- Name things clearly - \`getUserById\` not \`get\` or \`fetch\`
 - Tests that actually test behavior, not just coverage percentages
 
 ## Writing & Documentation Standards
